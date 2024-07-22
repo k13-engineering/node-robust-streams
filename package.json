@@ -1,0 +1,44 @@
+{
+  "type": "module",
+  "name": "robust-streams",
+  "description": "Robust Streams library",
+  "version": "0.0.1",
+  "files": [
+    "dist"
+  ],
+  "main": "dist/lib/index.js",
+  "author": "Simon Kadisch",
+  "license": "LGPL-2.1",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/k13-engineering/node-robust-streams.git"
+  },
+  "bugs": {
+    "url": "https://github.com/k13-engineering/node-robust-streams/issues"
+  },
+  "homepage": "https://github.com/k13-engineering/node-robust-streams#readme",
+  "keywords": [
+    "streams",
+    "streaming",
+    "source",
+    "sink",
+    "duplex",
+    "pipeline"
+  ],
+  "dependencies": {
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.11",
+    "@eslint/js": "^9.7.0",
+    "c8": "^10.1.2",
+    "deno-node": "^0.0.7",
+    "tsx": "^4.16.2",
+    "typescript-eslint": "^7.16.1",
+    "ya-test-library": "^0.0.3"
+  },
+  "scripts": {
+    "build": "rm -rf dist/ && deno-node-build --root . --out dist/ --entry lib/index.ts",
+    "lint": "eslint .",
+    "test": "c8 --reporter lcov --reporter html --reporter text --all --src lib/ tsx test/index.js"
+  }
+}
