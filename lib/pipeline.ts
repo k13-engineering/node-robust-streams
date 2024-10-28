@@ -25,14 +25,19 @@ interface IPipelineNetworkFactory {
   stream: (args: IPipelineNetworkFactoryStreamArgs) => IPipelineNetworkStream;
 };
 
-interface IRewireWiring {
-  from: ISourceStreamFactory<TStreamChunk>;
-  via: IDuplexStreamFactory<TStreamChunk, TStreamChunk>[];
-  to: ISinkStreamFactory<TStreamChunk>;
+interface IRewireWiring<T extends TStreamChunk, U extends TStreamChunk, V extends TStreamChunk, W extends TStreamChunk> {
+  from: ISourceStreamFactory<T>;
+  via: IDuplexStreamFactory<V, W>[];
+  to: ISinkStreamFactory<U>;
 }
 
 interface IRewireablePipelineNetworkFactory extends IPipelineNetworkFactory {
-  rewire: (args: { wirings: IRewireWiring[] }) => void;
+  rewire: <
+    T extends TStreamChunk,
+    U extends TStreamChunk,
+    V extends TStreamChunk,
+    W extends TStreamChunk
+  >(args: { wirings: IRewireWiring<T, U, V, W>[] }) => void;
 };
 
 interface IInternalHandle {
@@ -481,18 +486,23 @@ const create = (): IRewireablePipelineNetworkFactory => {
     return sources;
   };
 
-  let initialWirings: IRewireWiring[] = [];
+  type TGenericRewireWiring = IRewireWiring<TStreamChunk, TStreamChunk, TStreamChunk, TStreamChunk>;
+
+  let initialWirings: TGenericRewireWiring[] = [];
 
   const rewire: IRewireablePipelineNetworkFactory["rewire"] = ({ wirings }) => {
 
+    // @ts-expect-error TODO: how to do this gracefully?
+    const wiringsGeneric = wirings as TGenericRewireWiring[];
+
     if (!started) {
-      initialWirings = wirings;
+      initialWirings = wiringsGeneric;
       return;
     }
 
     let newConnections: IInternalConnection[] = [];
 
-    wirings.forEach((wiring) => {
+    wiringsGeneric.forEach((wiring) => {
       if (wiring.via.length === 0) {
         newConnections = [
           ...newConnections,
@@ -611,13 +621,13 @@ const createLinear = ({
 };
 
 
-type TPipelineSourceOpenFunc = <T extends TStreamChunk> (args: { output: ISinkStreamFactory<T> }) => IPipelineNetworkFactory;
+type TPipelineSourceOpenFunc<T extends TStreamChunk> = (args: { output: ISinkStreamFactory<T> }) => IPipelineNetworkFactory;
 
 
 const pipelineSource = <T extends TStreamChunk>({
   open
 }: {
-  open: TPipelineSourceOpenFunc
+  open: TPipelineSourceOpenFunc<T>
 }): ISourceStreamFactory<T> => {
 
   return {

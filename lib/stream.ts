@@ -6,7 +6,7 @@ interface IStream {
   destroy: (args?: { reason?: string }) => void;
 };
 
-type TStreamChunk = object | string;
+type TStreamChunk = { [key: string]: unknown } | string;
 
 type TStreamError = globalThis.Error;
 
