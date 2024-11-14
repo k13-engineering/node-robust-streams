@@ -1,9 +1,13 @@
 /* eslint-disable complexity */
 /* eslint-disable max-statements */
 
-import { IStreamFactory, TStreamChunk, TStreamError } from "./stream.ts";
-import { ISourceStream } from "./source.ts";
-import { ISinkStream } from "./sink.ts";
+import type {
+  IStreamFactory,
+  TStreamChunk,
+  TStreamError
+} from "./stream.ts";
+import type { ISourceStream } from "./source.ts";
+import type { ISinkStream } from "./sink.ts";
 import {
   StreamAlreadyDestroyedError,
   StreamAlreadyEndedError,

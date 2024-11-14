@@ -1,8 +1,14 @@
 /* eslint-disable complexity */
 /* eslint-disable max-statements */
 
-import { IStreamFactory, IStream, TStreamChunk, TStreamError } from "./stream.ts";
-import { ILogger, ELogLevel } from "./debug.ts";
+import type {
+  IStreamFactory,
+  IStream,
+  TStreamChunk,
+  TStreamError
+} from "./stream.ts";
+import { ELogLevel } from "./debug.ts";
+import type { ILogger } from "./debug.ts";
 import {
   StreamAlreadyDestroyedError,
   StreamAlreadyFailedError,

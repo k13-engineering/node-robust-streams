@@ -12,7 +12,13 @@ import {
   StreamResumeDuringNextError,
   StreamCallbackDuringPauseError
 } from "./errors.ts";
-import { IStreamFactory, IStream, TStreamChunk, TStreamError } from "./stream.ts";
+
+import type {
+  IStreamFactory,
+  IStream,
+  TStreamChunk,
+  TStreamError
+} from "./stream.ts";
 
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 interface ISourceStream<T extends TStreamChunk> extends IStream {
