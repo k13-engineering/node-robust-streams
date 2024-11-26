@@ -90,7 +90,7 @@ const create = (): IRewireablePipelineNetworkFactory => {
 
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const handleFail = ({ error }: { error: TStreamError }) => {
-    throw Error("not implemented yet");
+    throw Error("not implemented yet", { cause: error });
   };
 
   const maybeFinishSome = () => {
