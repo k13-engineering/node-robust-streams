@@ -717,12 +717,12 @@ const pipelineSource = <T extends TStreamChunk>({
   };
 };
 
-type TPipelineSinkOpenFunc = (args: { input: ISourceStreamFactory<TStreamChunk> }) => IPipelineNetworkFactory;
+type TPipelineSinkOpenFunc <T extends TStreamChunk> = (args: { input: ISourceStreamFactory<T> }) => IPipelineNetworkFactory;
 
 const pipelineSink = <T extends TStreamChunk>({
   open
 }: {
-  open: TPipelineSinkOpenFunc
+  open: TPipelineSinkOpenFunc<T>
 }): ISinkStreamFactory<T> => {
   return sink({
     open: ({ drain, fail }) => {
@@ -734,7 +734,7 @@ const pipelineSink = <T extends TStreamChunk>({
       let sourceNext: ((args: { chunks: T[] }) => void) | undefined = undefined;
       let sourceEnd: (() => void) | undefined = undefined;
 
-      const input = source({
+      const input = source<T>({
         open: ({ next, end }) => {
 
           sourceNext = next;
@@ -811,12 +811,12 @@ const pipelineSink = <T extends TStreamChunk>({
   });
 };
 
-type TPipelineTransformOpenFunc = <T extends TStreamChunk, U extends TStreamChunk>(args: {
+type TPipelineTransformOpenFunc<T extends TStreamChunk, U extends TStreamChunk> = (args: {
   input: ISourceStreamFactory<T>,
   output: ISinkStreamFactory<U>
 }) => IPipelineNetworkFactory;
 
-const pipelineTransform = <T extends TStreamChunk, U extends TStreamChunk>({ open }: { open: TPipelineTransformOpenFunc }) => {
+const pipelineTransform = <T extends TStreamChunk, U extends TStreamChunk>({ open }: { open: TPipelineTransformOpenFunc<T, U> }) => {
   return duplex<T, U>({
     open: ({ drain: duplexDrain, next: duplexNext, end: duplexEnd, fail: duplexFail }) => {
 
@@ -957,11 +957,30 @@ const pipelineTransform = <T extends TStreamChunk, U extends TStreamChunk>({ ope
   });
 };
 
+const chain = <SourceChunk extends TStreamChunk>({ from }: { from: ISourceStreamFactory<SourceChunk> }) => {
+
+  const via = <T extends TStreamChunk> ({ transform }: { transform: IDuplexStreamFactory<SourceChunk, T> }) => {
+
+    const end = ({ to }: { to: ISinkStreamFactory<T> }) => {
+    };
+
+    return {
+      end
+    };
+  };
+
+  return {
+    via
+  };
+};
+
 export {
   create,
   createLinear,
 
   pipelineSource,
   pipelineSink,
-  pipelineTransform
+  pipelineTransform,
+
+  chain
 };
