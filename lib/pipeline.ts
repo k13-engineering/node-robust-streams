@@ -90,7 +90,16 @@ const create = (): IRewireablePipelineNetworkFactory => {
 
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const handleFail = ({ error }: { error: TStreamError }) => {
-    throw Error("not implemented yet", { cause: error });
+
+    internalSourceHandles.forEach((handle) => {
+      handle.destroy();
+    });
+
+    internalSinkHandles.forEach((handle) => {
+      handle.destroy();
+    });
+
+    callbacks!.failed({ error });
   };
 
   const maybeFinishSome = () => {
@@ -126,6 +135,7 @@ const create = (): IRewireablePipelineNetworkFactory => {
 
     let paused = true;
     let ended = false;
+    let failed = false;
 
     const stream = sourceFactory.open({
       next: ({ chunks }) => {
@@ -138,6 +148,7 @@ const create = (): IRewireablePipelineNetworkFactory => {
       },
 
       fail: ({ error }) => {
+        failed = true;
         handleFail({ error });
       }
     });
@@ -155,7 +166,12 @@ const create = (): IRewireablePipelineNetworkFactory => {
         stream.resume();
         maybePauseOrResume();
       },
+
       destroy: () => {
+        if (failed || ended) {
+          return;
+        }
+
         stream.destroy();
       },
 
@@ -187,6 +203,7 @@ const create = (): IRewireablePipelineNetworkFactory => {
     let takesMore = true;
     let finishing = false;
     let finished = false;
+    let failed = false;
 
     const stream = factory.open({
       drain: () => {
@@ -195,6 +212,7 @@ const create = (): IRewireablePipelineNetworkFactory => {
       },
 
       fail: ({ error }) => {
+        failed = true;
         handleFail({ error });
       }
     });
@@ -222,6 +240,10 @@ const create = (): IRewireablePipelineNetworkFactory => {
       },
 
       destroy: () => {
+        if (failed || finished) {
+          return;
+        }
+
         stream.destroy();
       },
 
@@ -268,6 +290,7 @@ const create = (): IRewireablePipelineNetworkFactory => {
     let finished = false;
     let paused = true;
     let ended = false;
+    let failed = false;
 
     const stream = factory.open({
       next: ({ chunks }) => {
@@ -285,6 +308,7 @@ const create = (): IRewireablePipelineNetworkFactory => {
       },
 
       fail: ({ error }) => {
+        failed = true;
         handleFail({ error });
       }
     });
@@ -293,9 +317,23 @@ const create = (): IRewireablePipelineNetworkFactory => {
     let sinkDestroyed = false;
 
     const maybeDestroyStream = () => {
-      if (sourceDestroyed && sinkDestroyed) {
-        stream.destroy();
+      if (!sourceDestroyed) {
+        return;
       }
+
+      if (!sinkDestroyed) {
+        return;
+      }
+
+      if (failed) {
+        return;
+      }
+
+      if (finished && ended) {
+        return;
+      }
+
+      stream.destroy();
     };
 
     const selfSource: IInternalSourceHandle = {
