@@ -40,26 +40,14 @@ StreamAlreadyEndedError = makeError({ StreamAlreadyEndedError });
 let StreamAlreadyOpenedError = boostrap;
 StreamAlreadyOpenedError = makeError({ StreamAlreadyOpenedError });
 
-let StreamAlreadyPausedError = boostrap;
-StreamAlreadyPausedError = makeError({ StreamAlreadyPausedError });
-
-let StreamNotPausedError = boostrap;
-StreamNotPausedError = makeError({ StreamNotPausedError });
-
 let StreamReentrancyError = boostrap;
 StreamReentrancyError = makeError({ StreamReentrancyError });
 
-let StreamResumeDuringNextError = boostrap;
-StreamResumeDuringNextError = makeError({ StreamResumeDuringNextError });
-
-let StreamDrainDuringWriteError = boostrap;
-StreamDrainDuringWriteError = makeError({ StreamDrainDuringWriteError });
-
-let StreamCallbackDuringPauseError = boostrap;
-StreamCallbackDuringPauseError = makeError({ StreamCallbackDuringPauseError });
-
 let StreamDuplexLoopError = boostrap;
 StreamDuplexLoopError = makeError({ StreamDuplexLoopError });
+
+let StreamCallbackDuringBackpressureError = boostrap;
+StreamCallbackDuringBackpressureError = makeError({ StreamCallbackDuringBackpressureError });
 
 export {
   StreamAlreadyDestroyedError,
@@ -68,11 +56,7 @@ export {
   StreamAlreadyFinishedError,
   StreamAlreadyEndedError,
   StreamAlreadyOpenedError,
-  StreamAlreadyPausedError,
-  StreamNotPausedError,
   StreamReentrancyError,
-  StreamResumeDuringNextError,
-  StreamDrainDuringWriteError,
-  StreamCallbackDuringPauseError,
   StreamDuplexLoopError,
+  StreamCallbackDuringBackpressureError
 };

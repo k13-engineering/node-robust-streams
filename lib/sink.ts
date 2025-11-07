@@ -2,41 +2,41 @@
 /* eslint-disable max-statements */
 
 import type {
-  IStreamFactory,
-  IStream,
   TStreamChunk,
-  TStreamError
+  TStreamBackpressureFunc,
+  TStreamFailFunc,
+  TStreamDestroyFunc
 } from "./stream.ts";
 import { ELogLevel } from "./debug.ts";
-import type { ILogger } from "./debug.ts";
+import type { ILogger, TELogLevel } from "./debug.ts";
 import {
   StreamAlreadyDestroyedError,
   StreamAlreadyFailedError,
   StreamAlreadyFinishedError,
   StreamAlreadyFinishingError,
   StreamReentrancyError,
-  StreamDrainDuringWriteError
 } from "./errors.ts";
 
-interface ISinkStream<T extends TStreamChunk> extends IStream {
-  write: ({ chunks }: { chunks: T[] }) => { takesMore: boolean };
-  finish: ({ done }: { done: () => void }) => void;
+type TSinkStream<T extends TStreamChunk> = {
+  destroy: TStreamDestroyFunc;
+  write: ({ chunks }: { chunks: T[] }) => undefined;
+  finish: ({ done }: { done: () => void }) => undefined;
 };
 
-interface ISinkStreamFactoryOptions {
-  drain: () => void;
-  fail: ({ error }: { error: TStreamError }) => void;
+type TSinkStreamFactoryOptions = {
+  backpressure: TStreamBackpressureFunc;
+  fail: TStreamFailFunc;
 };
 
-interface ISinkStreamFactory<T extends TStreamChunk> extends IStreamFactory {
-  open: (options: ISinkStreamFactoryOptions) => ISinkStream<T>;
+type TSinkStreamFactory<T extends TStreamChunk> = {
+  openSinkStream: (options: TSinkStreamFactoryOptions) => TSinkStream<T>;
 };
 
-interface IDebuggableSinkStreamFactory<T extends TStreamChunk> extends ISinkStreamFactory<T> {
-  debug: (args: { log: (args: { message: string }) => void }) => ISinkStreamFactory<T>;
+type TDebuggableSinkStreamFactory<T extends TStreamChunk> = TSinkStreamFactory<T> & {
+  debug: (args: { log: (args: { message: string }) => undefined }) => TSinkStreamFactory<T>;
 };
 
-const sink = <T extends TStreamChunk>({ open: providedOpen }: ISinkStreamFactory<T>): IDebuggableSinkStreamFactory<T> => {
+const sink = <T extends TStreamChunk>({ openSinkStream: providedOpen }: TSinkStreamFactory<T>): TDebuggableSinkStreamFactory<T> => {
   let opened = false;
   let finishing = false;
   let finished = false;
@@ -44,7 +44,7 @@ const sink = <T extends TStreamChunk>({ open: providedOpen }: ISinkStreamFactory
   let failed = false;
 
   let logger: ILogger | undefined = undefined;
-  const log = ({ level, message }: { level: ELogLevel, message: string }) => {
+  const log = ({ level, message }: { level: TELogLevel, message: string }) => {
     if (logger) {
       logger.log({ level, message });
     }
@@ -56,17 +56,18 @@ const sink = <T extends TStreamChunk>({ open: providedOpen }: ISinkStreamFactory
   };
 
   let writeEntered = false;
-  let drainEntered = false;
+  let backpressureEntered = false;
 
-  const open: ISinkStreamFactory<T>["open"] = ({ drain: providedDrain, fail: providedFail }): ISinkStream<T> => {
+  type C = TDebuggableSinkStreamFactory<T>;
+  type A = TSinkStreamFactoryOptions;
+
+  const openSinkStream: C["openSinkStream"] = ({ backpressure: providedBackpressure, fail: providedFail }) => {
 
     if (opened) {
       throw Error(`cannot open a stream that is already open`);
     }
 
-    opened = true;
-
-    const fail = ({ error }: { error: TStreamError }) => {
+    const fail: A["fail"] = ({ error }) => {
       if (failed) {
         throw StreamAlreadyFailedError({ message: `fail: cannot fail a stream that is already failed` });
       }
@@ -85,44 +86,46 @@ const sink = <T extends TStreamChunk>({ open: providedOpen }: ISinkStreamFactory
       providedFail({ error });
     };
 
-    const drain = () => {
+    const backpressure: A["backpressure"] = ({ pressure }) => {
+
+      if (pressure < 0 || pressure > 1) {
+        throw Error(`backpressure: pressure must be between 0 and 1`);
+      }
+
       if (failed) {
-        throw StreamAlreadyFailedError({ message: `drain: cannot drain a stream that is already failed` });
+        throw StreamAlreadyFailedError({ message: `backpressure: cannot backpressure a stream that is already failed` });
       }
 
       if (destroyed) {
-        throw StreamAlreadyDestroyedError({ message: `drain: cannot drain a stream that is already destroyed` });
+        throw StreamAlreadyDestroyedError({ message: `backpressure: cannot backpressure a stream that is already destroyed` });
       }
 
       if (finishing) {
-        throw StreamAlreadyFinishingError({ message: `drain: cannot drain a stream that is finishing` });
+        throw StreamAlreadyFinishingError({ message: `backpressure: cannot backpressure a stream that is finishing` });
       }
 
       if (finished) {
-        throw StreamAlreadyFinishedError({ message: `drain: cannot drain a stream that is already finished` });
+        throw StreamAlreadyFinishedError({ message: `backpressure: cannot backpressure a stream that is already finished` });
       }
 
-      log({ level: ELogLevel.INFO, message: `drain` });
+      log({ level: ELogLevel.INFO, message: `backpressure` });
 
-      if (drainEntered) {
-        throw StreamReentrancyError({ message: `drain: reentrancy detected` });
+      if (backpressureEntered) {
+        throw StreamReentrancyError({ message: `backpressure: reentrancy detected` });
       }
 
-      if (writeEntered) {
-        throw StreamDrainDuringWriteError({ message: `drain: cannot drain during write` });
-      }
-
-      drainEntered = true;
+      backpressureEntered = true;
 
       try {
-        providedDrain();
+        providedBackpressure({ pressure });
       } finally {
-        drainEntered = false;
+        backpressureEntered = false;
       }
     };
 
     log({ level: ELogLevel.INFO, message: `open` });
-    const { write, finish, destroy } = providedOpen({ drain, fail });
+    const { write, finish, destroy } = providedOpen({ backpressure, fail });
+    opened = true;
 
     return {
       write: ({ chunks }) => {
@@ -207,7 +210,7 @@ const sink = <T extends TStreamChunk>({ open: providedOpen }: ISinkStreamFactory
         finish({ done });
       },
 
-      destroy: ({ reason } = {}) => {
+      destroy: ({ reason }) => {
         if (failed) {
           throw StreamAlreadyFailedError({ message: `destroy: cannot destroy a failed stream` });
         }
@@ -223,12 +226,12 @@ const sink = <T extends TStreamChunk>({ open: providedOpen }: ISinkStreamFactory
         log({ level: ELogLevel.INFO, message: `destroy, reason: ${reason || "unknown"}` });
 
         destroyed = true;
-        destroy();
+        destroy({ reason });
       },
     };
   };
 
-  const debug: IDebuggableSinkStreamFactory<T>["debug"] = ({ log: providedLog }) => {
+  const debug: C["debug"] = ({ log: providedLog }) => {
     if (logger) {
       throw Error(`logger already set`);
     }
@@ -238,77 +241,22 @@ const sink = <T extends TStreamChunk>({ open: providedOpen }: ISinkStreamFactory
     };
 
     return {
-      open
+      openSinkStream
     };
   };
 
   return {
-    open,
+    openSinkStream,
     debug
   };
 };
 
-const syncSink = <T extends TStreamChunk>({
-  write: providedWrite,
-  finish: providedFinish,
-  destroy: providedDestroy
-}: {
-  write: (args: { chunks: T[] }) => void,
-  finish: () => void,
-  destroy: () => void
-}) => {
-  return sink({
-    open: () => {
-      const write = ({ chunks }: { chunks: T[] }) => {
-        providedWrite({ chunks });
-
-        return {
-          takesMore: true
-        };
-      };
-
-      const finish = ({ done }: { done: () => void }) => {
-        providedFinish();
-        done();
-      };
-
-      const destroy = () => {
-        providedDestroy();
-      };
-
-      return {
-        write,
-        finish,
-        destroy
-      };
-    }
-  });
-};
-
-const nullSink = () => {
-  return syncSink({
-    write: () => {
-      // unused
-    },
-
-    finish: () => {
-      // unused
-    },
-
-    destroy: () => {
-      // unused
-    }
-  });
-};
-
 export type {
-  ISinkStream,
-  ISinkStreamFactory,
-  ISinkStreamFactoryOptions,
+  TSinkStream,
+  TSinkStreamFactory,
+  TSinkStreamFactoryOptions,
 };
 
 export {
   sink,
-  syncSink,
-  nullSink
 };

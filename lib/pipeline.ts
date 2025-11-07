@@ -3,628 +3,535 @@
 
 /* eslint-disable no-use-before-define */
 
-import type { ISourceStreamFactory } from "./source.ts";
-import type { ISinkStreamFactory } from "./sink.ts";
-import type { IDuplexStreamFactory } from "./duplex.ts";
-import type { IStreamFactory, TStreamChunk, TStreamError } from "./stream.ts";
+import type { TSourceStream, TSourceStreamFactory } from "./source.ts";
+import type { TSinkStream, TSinkStreamFactory } from "./sink.ts";
+import { type TDuplexStreamFactory, type TDuplexStream } from "./duplex.ts";
+import type { TStreamChunk, TStreamError } from "./stream.ts";
 
-import { sink } from "./sink.ts";
-import { source } from "./source.ts";
-import { duplex } from "./duplex.ts";
-
-interface IPipelineNetworkStream {
+type TPipelineNetworkStream = {
   destroy: () => void;
 };
 
-interface IPipelineNetworkFactoryStreamArgs {
+type TGenericWiring = {
+  from: TSourceStreamFactory<TStreamChunk> | TDuplexStreamFactory<TStreamChunk, TStreamChunk>;
+  to: TSinkStreamFactory<TStreamChunk> | TDuplexStreamFactory<TStreamChunk, TStreamChunk>;
+};
+
+type TPipelineNetworkFactoryStreamArgs = {
   done: () => void;
   failed: (args: { error: TStreamError }) => void;
 };
 
-interface IPipelineNetworkFactory {
-  stream: (args: IPipelineNetworkFactoryStreamArgs) => IPipelineNetworkStream;
+const pipeline = <T extends TStreamChunk, U extends TStreamChunk, V extends TStreamChunk>({ from, to }: {
+  from: TSourceStreamFactory<T> | TDuplexStreamFactory<U, T>,
+  to: TSinkStreamFactory<T> | TDuplexStreamFactory<T, V>
+}): TGenericWiring => {
+  return {
+    from: from as TSourceStreamFactory<TStreamChunk> | TDuplexStreamFactory<TStreamChunk, TStreamChunk>,
+    to: to as TSinkStreamFactory<TStreamChunk> | TDuplexStreamFactory<TStreamChunk, TStreamChunk>
+  };
 };
 
-interface IRewireWiring<T extends TStreamChunk, U extends TStreamChunk, V extends TStreamChunk, W extends TStreamChunk> {
-  from: ISourceStreamFactory<T>;
-  via: IDuplexStreamFactory<V, W>[];
-  to: ISinkStreamFactory<U>;
-}
-
-interface IRewireablePipelineNetworkFactory extends IPipelineNetworkFactory {
-  rewire: <
-    T extends TStreamChunk,
-    U extends TStreamChunk,
-    V extends TStreamChunk,
-    W extends TStreamChunk
-  >(args: { wirings: IRewireWiring<T, U, V, W>[] }) => void;
+type TPipelineNetwork = {
+  rewire: (args: { network: TGenericWiring[] }) => void;
+  stream: (args: TPipelineNetworkFactoryStreamArgs) => TPipelineNetworkStream;
 };
 
-interface IInternalHandle {
-  factory: IStreamFactory;
-  destroy: () => void;
-};
+const createPipelineNetwork = (): TPipelineNetwork => {
 
-interface IInternalSourceHandle extends IInternalHandle {
-  pause: () => void;
-  resume: () => void;
-  status: () => {
-    paused: boolean;
+  type C = TPipelineNetwork;
+
+  type TSourceStreamContext = {
+    factory: TSourceStreamFactory<TStreamChunk>;
+    stream: TSourceStream;
     ended: boolean;
-  }
-};
+    failed: boolean;
+    backpressureRequestedByNetwork: number;
+  };
 
-interface IInternalSinkHandle extends IInternalHandle {
-  write: (args: { chunks: TStreamChunk[] }) => void;
-  finish: (args: { done: () => void }) => void;
-  status: () => {
-    takesMore: boolean;
+  type TDuplexStreamContext = {
+    factory: TDuplexStreamFactory<TStreamChunk, TStreamChunk>;
+    stream: TDuplexStream<TStreamChunk, TStreamChunk>;
+    ended: boolean;
     finishing: boolean;
     finished: boolean;
-  }
-};
+    failed: boolean;
+    backpressureRequestedByNetwork: number;
+    backpressureRequestedBySink: number;
+  };
 
-interface IInternalConnection {
-  source: IInternalSourceHandle;
-  sink: IInternalSinkHandle;
-};
+  type TSinkStreamContext = {
+    factory: TSinkStreamFactory<TStreamChunk>;
+    stream: TSinkStream<TStreamChunk>;
+    finishing: boolean;
+    finished: boolean;
+    failed: boolean;
+    backpressureRequestedBySink: number;
+  };
 
-const create = (): IRewireablePipelineNetworkFactory => {
+  let sourceContexts: TSourceStreamContext[] = [];
+  let duplexContexts: TDuplexStreamContext[] = [];
+  let sinkContexts: TSinkStreamContext[] = [];
 
-  let connections: IInternalConnection[] = [];
-  // TODO: HACK: LEAK!!
-  let internalSourceHandles: IInternalSourceHandle[] = [];
-  let internalSinkHandles: IInternalSinkHandle[] = [];
+  let providedWirings: TGenericWiring[] = [];
 
-  const handleNext = ({ source: internalSourceHandle, chunks }: { source: IInternalSourceHandle, chunks: TStreamChunk[] }) => {
-    const targets = findTargetStreamsOfSource({ source: internalSourceHandle });
+  let started = false;
+  let failed = false;
+  let callbacks: TPipelineNetworkFactoryStreamArgs | undefined = undefined;
 
-    targets.forEach((targetSink) => {
-      if (destroyed) {
+  const failNetwork = ({ error }: { error: TStreamError }) => {
+    if (failed) {
+      throw Error("BUG: pipeline network already failed");
+    }
+
+    if (callbacks === undefined) {
+      throw Error("BUG: pipeline network not started");
+    }
+
+    failed = true;
+
+    sourceContexts.forEach((s) => {
+      if (s.failed || s.ended) {
         return;
       }
 
-      targetSink.write({ chunks });
-    });
-  };
-
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  const handleFail = ({ error }: { error: TStreamError }) => {
-
-    internalSourceHandles.forEach((handle) => {
-      handle.destroy();
+      s.stream.destroy();
     });
 
-    internalSinkHandles.forEach((handle) => {
-      handle.destroy();
+    duplexContexts.forEach((d) => {
+      if (d.failed || (d.finished && d.ended)) {
+        return;
+      }
+
+      d.stream.destroy();
+    });
+
+    sinkContexts.forEach((s) => {
+      if (s.failed || s.finished) {
+        return;
+      }
+
+      s.stream.destroy({ reason: "pipeline failed" });
     });
 
     callbacks!.failed({ error });
   };
 
-  const maybeFinishSome = () => {
-    const sinks = findAllInternalSinks();
-    sinks.forEach((internalSink) => {
-      const sinkStatus = internalSink.status();
-
-      if (sinkStatus.finishing) {
-        return;
-      }
-
-      const sources = findSourceStreamsOfSink({ sink: internalSink });
-
-      const allSourcesEnded = sources.every((src) => {
-        const sourceStatus = src.status();
-        return sourceStatus.ended;
-      });
-
-      if (allSourcesEnded) {
-        internalSink.finish({ done: () => { } });
-      }
-    });
-  };
-
-  const maybeCreateSourceHandle = ({ source: sourceFactory }: { source: ISourceStreamFactory<TStreamChunk> }): IInternalSourceHandle => {
-    const existingHandle = internalSourceHandles.find((handle) => {
-      return handle.factory === sourceFactory;
+  const findAndDedupeAllStreamFactories = ({ wirings }: { wirings: TGenericWiring[] }) => {
+    const providedSourceOrDuplexFactories = wirings.map((w) => {
+      return w.from;
     });
 
-    if (existingHandle !== undefined) {
-      return existingHandle;
-    }
-
-    let paused = true;
-    let ended = false;
-    let failed = false;
-
-    const stream = sourceFactory.open({
-      next: ({ chunks }) => {
-        handleNext({ source: self, chunks });
-      },
-
-      end: () => {
-        ended = true;
-        maybeFinishSome();
-      },
-
-      fail: ({ error }) => {
-        failed = true;
-        handleFail({ error });
-      }
+    const providedSinkOrDuplexFactories = wirings.map((w) => {
+      return w.to;
     });
 
-    const self: IInternalSourceHandle = {
-      factory: sourceFactory,
-
-      pause: () => {
-        paused = true;
-        stream.pause();
-        maybePauseOrResume();
-      },
-      resume: () => {
-        paused = false;
-        stream.resume();
-        maybePauseOrResume();
-      },
-
-      destroy: () => {
-        if (failed || ended) {
-          return;
-        }
-
-        stream.destroy();
-      },
-
-      status: () => {
-        return {
-          paused,
-          ended
-        };
-      }
-    };
-
-    internalSourceHandles = [
-      ...internalSourceHandles,
-      self
+    const providedFactories = [
+      ...providedSourceOrDuplexFactories,
+      ...providedSinkOrDuplexFactories
     ];
 
-    return self;
+    const dedupedProvidedFactories: typeof providedFactories = [];
+    providedFactories.forEach((f) => {
+      if (!dedupedProvidedFactories.includes(f)) {
+        dedupedProvidedFactories.push(f);
+      }
+    });
+
+    return dedupedProvidedFactories;
   };
 
-  const maybeCreateSinkHandle = ({ factory }: { factory: ISinkStreamFactory<TStreamChunk> }): IInternalSinkHandle => {
-    const existingHandle = internalSinkHandles.find((handle) => {
-      return handle.factory === factory;
+  const findTargetContextsForSourceFactory = ({ factory }: { factory: TSourceStreamFactory<TStreamChunk> | TDuplexStreamFactory<TStreamChunk, TStreamChunk> }) => {
+    const relevantWirings = providedWirings.filter((w) => {
+      return w.from === factory;
     });
 
-    if (existingHandle !== undefined) {
-      return existingHandle;
+    const targetSinkFactories = relevantWirings.map((w) => {
+      return w.to;
+    });
+
+    const targetSinkContexts = sinkContexts.filter((s) => {
+      return targetSinkFactories.includes(s.factory);
+    });
+
+    const targetDuplexContexts = duplexContexts.filter((d) => {
+      return targetSinkFactories.includes(d.factory);
+    });
+
+    const targetContexts = [...targetSinkContexts, ...targetDuplexContexts];
+
+    return targetContexts;
+  };
+
+  const findSourceContextsForSinkFactory = ({ factory }: { factory: TSinkStreamFactory<TStreamChunk> | TDuplexStreamFactory<TStreamChunk, TStreamChunk> }) => {
+    const relevantWirings = providedWirings.filter((w) => {
+      return w.to === factory;
+    });
+
+    const sourceFactories = relevantWirings.map((w) => {
+      return w.from;
+    });
+
+    const connectedSourceContexts = sourceContexts.filter((s) => {
+      return sourceFactories.includes(s.factory);
+    });
+
+    const connectedDuplexContexts = duplexContexts.filter((d) => {
+      return sourceFactories.includes(d.factory);
+    });
+
+    const sourceContextsForSink = [...connectedSourceContexts, ...connectedDuplexContexts];
+
+    return sourceContextsForSink;
+  };
+
+  const determineBackpressureBasedOnTargetContexts = ({ targetContexts }: {
+    targetContexts: (TSinkStreamContext | TDuplexStreamContext)[]
+  }) => {
+    let backpressure = 0;
+
+    // naive strategy: if any target requests backpressure == 1, propagate backpressure 1
+    targetContexts.forEach((targetContext) => {
+      if (targetContext.backpressureRequestedBySink >= 1) {
+        backpressure = 1;
+      }
+    });
+
+    return backpressure;
+  };
+
+  const updateBackpressureOfSourceContext = ({ sourceContext }: {
+    sourceContext: TSourceStreamContext | TDuplexStreamContext
+  }) => {
+    const targetContexts = findTargetContextsForSourceFactory({ factory: sourceContext.factory });
+
+    const backpressure = determineBackpressureBasedOnTargetContexts({ targetContexts });
+
+    // needed to avoid infinite loops
+    if (sourceContext.backpressureRequestedByNetwork !== backpressure) {
+      sourceContext.backpressureRequestedByNetwork = backpressure;
+      sourceContext.stream.backpressure({ pressure: backpressure });
     }
+  };
 
-    let takesMore = true;
-    let finishing = false;
-    let finished = false;
-    let failed = false;
+  const updateBackpressure = ({ targetContext }: { targetContext: TSinkStreamContext | TDuplexStreamContext }) => {
+    targetContext;
 
-    const stream = factory.open({
-      drain: () => {
-        takesMore = true;
-        maybePauseOrResume();
-      },
-
-      fail: ({ error }) => {
-        failed = true;
-        handleFail({ error });
-      }
-    });
-
-    const self: IInternalSinkHandle = {
-      factory,
-
-      write: ({ chunks }) => {
-        const result = stream.write({ chunks });
-
-        if (!result.takesMore && takesMore === true) {
-          takesMore = false;
-          maybePauseOrResume();
-        }
-      },
-
-      finish: () => {
-        finishing = true;
-        stream.finish({
-          done: () => {
-            finished = true;
-            maybePipelineDone();
-          }
-        });
-      },
-
-      destroy: () => {
-        if (failed || finished) {
-          return;
-        }
-
-        stream.destroy();
-      },
-
-      status: () => {
-        return {
-          takesMore,
-          finishing,
-          finished
-        };
-      }
-    };
-
-    internalSinkHandles = [
-      ...internalSinkHandles,
-      self
+    // const affectedSourceContexts = findSourceContextsForSinkFactory({ factory: targetContext.factory });
+    const affectedSourceContexts = [
+      ...sourceContexts, ...duplexContexts
     ];
 
-    return self;
+    affectedSourceContexts.forEach((sourceContext) => {
+      updateBackpressureOfSourceContext({ sourceContext });
+    });
   };
 
-  const maybeCreateDuplexHandle = ({
-    factory
-  }: {
-    factory: IDuplexStreamFactory<TStreamChunk, TStreamChunk>
-  }): { source: IInternalSourceHandle, sink: IInternalSinkHandle } => {
+  const forwardChunksToTargetContexts = ({ chunks, targetContexts }: {
+    chunks: TStreamChunk[],
+    targetContexts: (TSinkStreamContext | TDuplexStreamContext)[]
+  }) => {
+    targetContexts.forEach((targetContext) => {
+      targetContext.stream.write({ chunks });
 
-    const existingSourceHandle = internalSourceHandles.find((handle) => {
-      return handle.factory === factory;
-    });
-
-    const existingSinkHandle = internalSinkHandles.find((handle) => {
-      return handle.factory === factory;
-    });
-
-    if (existingSourceHandle !== undefined && existingSinkHandle !== undefined) {
-      return {
-        source: existingSourceHandle,
-        sink: existingSinkHandle
-      };
-    }
-
-    let takesMore = true;
-    let finishing = false;
-    let finished = false;
-    let paused = true;
-    let ended = false;
-    let failed = false;
-
-    const stream = factory.open({
-      next: ({ chunks }) => {
-        handleNext({ source: selfSource, chunks });
-      },
-
-      end: () => {
-        ended = true;
-        maybeFinishSome();
-      },
-
-      drain: () => {
-        takesMore = true;
-        maybePauseOrResume();
-      },
-
-      fail: ({ error }) => {
-        failed = true;
-        handleFail({ error });
-      }
-    });
-
-    let sourceDestroyed = false;
-    let sinkDestroyed = false;
-
-    const maybeDestroyStream = () => {
-      if (!sourceDestroyed) {
-        return;
-      }
-
-      if (!sinkDestroyed) {
-        return;
-      }
+      // a stream might have failed during write
 
       if (failed) {
         return;
       }
+    });
+  };
 
-      if (finished && ended) {
+  let maybeEndEntered = false;
+
+  const maybeEndStreams = () => {
+
+    if (maybeEndEntered) {
+      throw Error("BUG: maybeEndStreams reentrancy detected");
+    }
+
+    maybeEndEntered = true;
+
+    const targetContexts = [
+      ...sinkContexts,
+      ...duplexContexts
+    ];
+
+    targetContexts.forEach((targetContext) => {
+
+      if (targetContext.finishing || targetContext.finished) {
         return;
       }
 
-      stream.destroy();
-    };
+      const connectedSourceContexts = findSourceContextsForSinkFactory({ factory: targetContext.factory });
 
-    const selfSource: IInternalSourceHandle = {
-      factory,
+      const allConnectedSourcesEnded = connectedSourceContexts.every((s) => {
+        return s.ended;
+      });
 
-      pause: () => {
-        paused = true;
-        stream.pause();
-      },
+      if (allConnectedSourcesEnded) {
 
-      resume: () => {
-        paused = false;
-        stream.resume();
-      },
+        targetContext.finishing = true;
 
-      destroy: () => {
-        sourceDestroyed = true;
-        maybeDestroyStream();
-      },
-
-      status: () => {
-        return {
-          paused,
-          ended
-        };
-      }
-    };
-
-    const selfSink: IInternalSinkHandle = {
-      factory,
-
-      write: ({ chunks }) => {
-        const result = stream.write({ chunks });
-
-        if (!result.takesMore && takesMore === true) {
-          takesMore = false;
-          maybePauseOrResume();
-        }
-      },
-
-      finish: () => {
-        finishing = true;
-        stream.finish({
+        targetContext.stream.finish({
           done: () => {
-            finished = true;
-            maybePipelineDone();
+            targetContext.finished = true;
+            maybeEmitDone();
           }
         });
-      },
-
-      destroy: () => {
-        sinkDestroyed = true;
-        maybeDestroyStream();
-      },
-
-      status: () => {
-        return {
-          takesMore,
-          finishing,
-          finished
-        };
-      }
-    };
-
-    internalSourceHandles = [
-      ...internalSourceHandles,
-      selfSource
-    ];
-
-    internalSinkHandles = [
-      ...internalSinkHandles,
-      selfSink
-    ];
-
-    return {
-      source: selfSource,
-      sink: selfSink
-    };
-  };
-
-  let started = false;
-  let destroyed = false;
-
-  let callbacks: IPipelineNetworkFactoryStreamArgs | undefined = undefined;
-
-  const findAllInternalSources = () => {
-    let allSources: IInternalSourceHandle[] = [];
-
-    connections.forEach((conn) => {
-      if (!allSources.includes(conn.source)) {
-        allSources = [
-          ...allSources,
-          conn.source
-        ];
       }
     });
 
-    return allSources;
+    maybeEndEntered = false;
   };
 
-  const findAllInternalSinks = () => {
-    let allSinks: IInternalSinkHandle[] = [];
+  let doneEmitted = false;
 
-    connections.forEach((conn) => {
-      if (!allSinks.includes(conn.sink)) {
-        allSinks = [
-          ...allSinks,
-          conn.sink
-        ];
+  const maybeEmitDone = () => {
+
+    if (doneEmitted) {
+      throw Error("BUG: done already emitted");
+    }
+
+    let done = true;
+
+    sourceContexts.forEach((s) => {
+      if (!s.ended) {
+        done = false;
       }
     });
 
-    return allSinks;
-  };
-
-  const findAllConnectedInternalSinks = ({ source: providedSource }: { source: IInternalSourceHandle }) => {
-    return connections.filter((conn) => {
-      return conn.source === providedSource;
-    }).map((conn) => {
-      return conn.sink;
-    });
-  };
-
-  const maybePipelineDone = () => {
-    const allSinks = findAllInternalSinks();
-
-    const allSinksFinished = allSinks.every((internalSink) => {
-      return internalSink.status().finished;
+    duplexContexts.forEach((d) => {
+      if (!d.ended || !d.finished) {
+        done = false;
+      }
     });
 
-    if (allSinksFinished) {
+    sinkContexts.forEach((s) => {
+      if (!s.finished) {
+        done = false;
+      }
+    });
+
+    if (done) {
+      doneEmitted = true;
       callbacks!.done();
     }
   };
 
-  const maybePauseOrResume = () => {
-    const allSources = findAllInternalSources();
-
-    allSources.forEach((internalSource) => {
-      const connectedSinks = findAllConnectedInternalSinks({ source: internalSource });
-
-      const allSinksTakeMore = connectedSinks.every((connectedSink) => {
-        return connectedSink.status().takesMore;
-      });
-
-      const sourceStatus = internalSource.status();
-      const paused = sourceStatus.paused;
-
-      if (paused && allSinksTakeMore) {
-        internalSource.resume();
-      } else if (!paused && !allSinksTakeMore) {
-        internalSource.pause();
-      }
-    });
-  };
-
-  const findTargetStreamsOfSource = ({ source: providedSource }: { source: IInternalSourceHandle }) => {
-    const targetConnections = connections.filter((conn) => {
-      return conn.source === providedSource;
-    });
-
-    const targets = targetConnections.map((conn) => {
-      return conn.sink;
-    });
-
-    let targetsDeduped: IInternalSinkHandle[] = [];
-    targets.forEach((target) => {
-      if (!targetsDeduped.includes(target)) {
-        targetsDeduped = [
-          ...targetsDeduped,
-          target
-        ];
-      }
-    });
-
-    return targetsDeduped;
-  };
-
-  const findSourceStreamsOfSink = ({ sink: providedSink }: { sink: IInternalSinkHandle }) => {
-    const relevantConnections = connections.filter((conn) => {
-      return conn.sink === providedSink;
-    });
-
-    const sources = relevantConnections.map((conn) => {
-      return conn.source;
-    });
-
-    return sources;
-  };
-
-  type TGenericRewireWiring = IRewireWiring<TStreamChunk, TStreamChunk, TStreamChunk, TStreamChunk>;
-
-  let initialWirings: TGenericRewireWiring[] = [];
-
-  const rewire: IRewireablePipelineNetworkFactory["rewire"] = ({ wirings }) => {
-
-    // @ts-expect-error TODO: how to do this gracefully?
-    const wiringsGeneric = wirings as TGenericRewireWiring[];
-
-    if (!started) {
-      initialWirings = wiringsGeneric;
+  let maybeEndScheduleHandle: NodeJS.Timeout | undefined = undefined;
+  const scheduleMaybeEndStreams = () => {
+    if (maybeEndScheduleHandle !== undefined) {
       return;
     }
 
-    let newConnections: IInternalConnection[] = [];
+    maybeEndScheduleHandle = setTimeout(() => {
+      maybeEndScheduleHandle = undefined;
+      maybeEndStreams();
+    }, 0);
+  };
 
-    wiringsGeneric.forEach((wiring) => {
-      if (wiring.via.length === 0) {
-        newConnections = [
-          ...newConnections,
-          {
-            source: maybeCreateSourceHandle({ source: wiring.from }),
-            sink: maybeCreateSinkHandle({ factory: wiring.to })
-          }
-        ];
+  const maybeUpdateStreams = () => {
+    if (!started) {
+      return;
+    }
 
-        return;
-      }
+    const streamFactories = findAndDedupeAllStreamFactories({ wirings: providedWirings });
 
-      let sourceHandle: IInternalSourceHandle = maybeCreateSourceHandle({ source: wiring.from });
+    const duplexFactories = streamFactories.filter((f) => {
+      return (f as TDuplexStreamFactory<TStreamChunk, TStreamChunk>).openDuplex !== undefined;
+    }) as TDuplexStreamFactory<TStreamChunk, TStreamChunk>[];
 
-      wiring.via.forEach((factory) => {
-        const duplexHandle = maybeCreateDuplexHandle({ factory });
+    // TODO: check lose ends
 
-        newConnections = [
-          ...newConnections,
-          {
-            source: sourceHandle,
-            sink: duplexHandle.sink
-          }
-        ];
+    const sourceFactories = streamFactories.filter((f) => {
+      return (f as TSourceStreamFactory<TStreamChunk>).openSourceStream !== undefined;
+    }) as TSourceStreamFactory<TStreamChunk>[];
 
-        sourceHandle = duplexHandle.source;
+    const sinkFactories = streamFactories.filter((f) => {
+      return (f as TSinkStreamFactory<TStreamChunk>).openSinkStream !== undefined;
+    }) as TSinkStreamFactory<TStreamChunk>[];
+
+    const duplexFactoriesToCreateStreamsFor = duplexFactories.filter((f) => {
+      const existing = duplexContexts.find((s) => {
+        return s.factory === f;
       });
 
-      newConnections = [
-        ...newConnections,
-        {
-          source: sourceHandle,
-          sink: maybeCreateSinkHandle({ factory: wiring.to })
-        }
+      return existing === undefined;
+    });
+
+    const sourceFactoriesToCreateStreamsFor = sourceFactories.filter((f) => {
+      const existing = sourceContexts.find((s) => {
+        return s.factory === f;
+      });
+
+      return existing === undefined;
+    });
+
+    const sinkFactoriesToCreateStreamsFor = sinkFactories.filter((f) => {
+      const existing = sinkContexts.find((s) => {
+        return s.factory === f;
+      });
+
+      return existing === undefined;
+    });
+
+    const duplexStreamsToRemove = duplexContexts.filter((s) => {
+      return !duplexFactories.includes(s.factory);
+    });
+
+    const sourceStreamsToRemove = sourceContexts.filter((s) => {
+      return !sourceFactories.includes(s.factory);
+    });
+
+    const sinkStreamsToRemove = sinkContexts.filter((s) => {
+      return !sinkFactories.includes(s.factory);
+    });
+
+    duplexStreamsToRemove.forEach((s) => {
+      if (!s.finished || !s.ended) {
+        s.stream.destroy();
+      }
+
+      duplexContexts = duplexContexts.filter((ss) => {
+        return ss !== s;
+      });
+    });
+
+    sourceStreamsToRemove.forEach((s) => {
+      if (!s.ended) {
+        s.stream.destroy();
+      }
+
+      sourceContexts = sourceContexts.filter((ss) => {
+        return ss !== s;
+      });
+    });
+
+    sinkStreamsToRemove.forEach((s) => {
+      if (!s.finished) {
+        s.stream.destroy({ reason: "removed from pipeline" });
+      }
+
+      sinkContexts = sinkContexts.filter((ss) => {
+        return ss !== s;
+      });
+    });
+
+    duplexFactoriesToCreateStreamsFor.forEach((f) => {
+
+      const newDuplexContext: TDuplexStreamContext = {
+        factory: f,
+        ended: false,
+        finishing: false,
+        finished: false,
+        failed: false,
+        backpressureRequestedByNetwork: 1,
+        backpressureRequestedBySink: 1,
+        stream: f.openDuplex({
+          backpressure: ({ pressure }) => {
+            newDuplexContext.backpressureRequestedBySink = pressure;
+            updateBackpressure({ targetContext: newDuplexContext });
+          },
+
+          next: ({ chunks }) => {
+            const targetContexts = findTargetContextsForSourceFactory({ factory: f });
+            forwardChunksToTargetContexts({ chunks, targetContexts });
+          },
+
+          end: () => {
+            newDuplexContext.ended = true;
+            scheduleMaybeEndStreams();
+            maybeEmitDone();
+          },
+
+          fail: ({ error }) => {
+            newDuplexContext.failed = true;
+            failNetwork({ error });
+          },
+        })
+      };
+
+      duplexContexts = [
+        ...duplexContexts,
+        newDuplexContext
       ];
     });
 
-    connections = newConnections;
+    sourceFactoriesToCreateStreamsFor.forEach((f) => {
 
-    maybePauseOrResume();
+      const newSourceContext: TSourceStreamContext = {
+        factory: f,
+        ended: false,
+        failed: false,
+        backpressureRequestedByNetwork: 1,
+        stream: f.openSourceStream({
+          next: ({ chunks }) => {
+            const targetContexts = findTargetContextsForSourceFactory({ factory: f });
+            forwardChunksToTargetContexts({ chunks, targetContexts });
+          },
 
-    // TODO: remove old handles
+          end: () => {
+            newSourceContext.ended = true;
+            scheduleMaybeEndStreams();
+            maybeEmitDone();
+          },
+
+          fail: ({ error }) => {
+            failNetwork({ error });
+          }
+        })
+      };
+
+      sourceContexts = [
+        ...sourceContexts,
+        newSourceContext
+      ];
+    });
+
+    sinkFactoriesToCreateStreamsFor.forEach((f) => {
+      const newSinkContext: TSinkStreamContext = {
+        factory: f,
+        finishing: false,
+        finished: false,
+        failed: false,
+        backpressureRequestedBySink: 1,
+        stream: f.openSinkStream({
+          backpressure: ({ pressure }) => {
+            newSinkContext.backpressureRequestedBySink = pressure;
+            updateBackpressure({ targetContext: newSinkContext });
+          },
+
+          fail: ({ error }) => {
+            newSinkContext.failed = true;
+            failNetwork({ error });
+          },
+        })
+      };
+
+      sinkContexts = [
+        ...sinkContexts,
+        newSinkContext
+      ];
+    });
   };
 
-  const stream: IPipelineNetworkFactory["stream"] = ({ done: providedDone, failed }) => {
+  const rewire: C["rewire"] = ({ network }) => {
+    providedWirings = network;
+    maybeUpdateStreams();
+  };
 
-    if (started) {
-      throw Error("pipeline network already started");
-    }
+  const stream: C["stream"] = ({ done, failed: failedCallback }) => {
 
-    callbacks = {
-      done: providedDone,
-      failed
+    callbacks = { done, failed: failedCallback };
+    started = true;
+    maybeUpdateStreams();
+
+    const destroy = () => {
     };
 
-    started = true;
-    rewire({ wirings: initialWirings });
-
     return {
-      destroy: () => {
-        destroyed = true;
-
-        let allHandles: IInternalHandle[] = [];
-
-        connections.forEach((conn) => {
-          if (!allHandles.includes(conn.source)) {
-            allHandles = [
-              ...allHandles,
-              conn.source
-            ];
-          }
-
-          if (!allHandles.includes(conn.sink)) {
-            allHandles = [
-              ...allHandles,
-              conn.sink
-            ];
-          }
-        });
-
-        allHandles.forEach((handle) => {
-          handle.destroy();
-        });
-      }
+      destroy
     };
   };
 
@@ -634,391 +541,7 @@ const create = (): IRewireablePipelineNetworkFactory => {
   };
 };
 
-const createLinear = ({
-  from,
-  via,
-  to
-}: {
-  from: ISourceStreamFactory<TStreamChunk>,
-  via: IDuplexStreamFactory<TStreamChunk, TStreamChunk>[],
-  to: ISinkStreamFactory<TStreamChunk>
-}) => {
-  const pn = create();
-
-  pn.rewire({
-    wirings: [
-      {
-        from,
-        via,
-        to
-      }
-    ]
-  });
-
-  return pn;
-};
-
-
-type TPipelineSourceOpenFunc<T extends TStreamChunk> = (args: { output: ISinkStreamFactory<T> }) => IPipelineNetworkFactory;
-
-
-const pipelineSource = <T extends TStreamChunk>({
-  open
-}: {
-  open: TPipelineSourceOpenFunc<T>
-}): ISourceStreamFactory<T> => {
-
-  return {
-    open: ({ next, end, fail }) => {
-
-      let paused = false;
-      let started = false;
-      let needsDrain = false;
-
-      let outputDrain: (() => void) | undefined = undefined;
-
-      const output = sink<T>({
-        open: ({ drain }) => {
-          outputDrain = drain;
-
-          return {
-            write: ({ chunks }) => {
-              if (!started) {
-                throw Error("write before first resume, expected, please implement");
-              }
-
-              next({ chunks });
-
-              const takesMore = !paused;
-              if (!takesMore) {
-                needsDrain = true;
-              }
-
-              return {
-                takesMore
-              };
-            },
-
-            finish: ({ done }) => {
-              console.log("virtual pipeline sink finished");
-              done();
-            },
-
-            destroy: () => {
-              // unused
-            }
-          };
-        }
-      });
-
-      const pipelineNetwork = open({
-        output
-      });
-
-      let pipelineNetworkStream: IPipelineNetworkStream | undefined = undefined;
-
-      return {
-        pause: () => {
-          paused = true;
-        },
-
-        resume: () => {
-          started = true;
-          paused = false;
-
-          if (pipelineNetworkStream === undefined) {
-            pipelineNetworkStream = pipelineNetwork.stream({
-              done: () => {
-                // unused
-                end();
-              },
-
-              failed: ({ error }) => {
-                fail({ error });
-              }
-            });
-          }
-
-          if (needsDrain) {
-            needsDrain = false;
-            outputDrain!();
-          }
-        },
-
-        destroy: () => {
-          if (pipelineNetworkStream !== undefined) {
-            pipelineNetworkStream.destroy();
-          }
-        }
-      };
-    }
-  };
-};
-
-type TPipelineSinkOpenFunc <T extends TStreamChunk> = (args: { input: ISourceStreamFactory<T> }) => IPipelineNetworkFactory;
-
-const pipelineSink = <T extends TStreamChunk>({
-  open
-}: {
-  open: TPipelineSinkOpenFunc<T>
-}): ISinkStreamFactory<T> => {
-  return sink({
-    open: ({ drain, fail }) => {
-
-      let started = false;
-      let paused = true;
-      let needsDrain = false;
-
-      let sourceNext: ((args: { chunks: T[] }) => void) | undefined = undefined;
-      let sourceEnd: (() => void) | undefined = undefined;
-
-      const input = source<T>({
-        open: ({ next, end }) => {
-
-          sourceNext = next;
-          sourceEnd = end;
-
-          return {
-            pause: () => {
-              paused = true;
-            },
-
-            resume: () => {
-              started = true;
-              paused = false;
-
-              if (needsDrain) {
-                needsDrain = false;
-                drain();
-              }
-            },
-
-            destroy: () => {
-              // unused
-            }
-          };
-        }
-      });
-
-      const pipelineNetwork = open({
-        input
-      });
-
-      let doneCallback: (() => void) | undefined = undefined;
-
-      const pipelineNetworkStream = pipelineNetwork.stream({
-        done: () => {
-          doneCallback!();
-        },
-
-        failed: ({ error }) => {
-          fail({ error });
-        }
-      });
-
-      return {
-        write: ({ chunks }) => {
-          if (!started) {
-            throw Error("BUG: write before first resume, expected, please implement");
-          }
-
-          sourceNext!({ chunks });
-
-          const takesMore = !paused;
-          if (!takesMore) {
-            needsDrain = true;
-          }
-
-          return {
-            takesMore
-          };
-        },
-
-        finish: ({ done }) => {
-          doneCallback = done;
-          sourceEnd!();
-        },
-
-        destroy: () => {
-          if (pipelineNetworkStream !== undefined) {
-            pipelineNetworkStream.destroy();
-          }
-        }
-      };
-    }
-  });
-};
-
-type TPipelineTransformOpenFunc<T extends TStreamChunk, U extends TStreamChunk> = (args: {
-  input: ISourceStreamFactory<T>,
-  output: ISinkStreamFactory<U>
-}) => IPipelineNetworkFactory;
-
-const pipelineTransform = <T extends TStreamChunk, U extends TStreamChunk>({ open }: { open: TPipelineTransformOpenFunc<T, U> }) => {
-  return duplex<T, U>({
-    open: ({ drain: duplexDrain, next: duplexNext, end: duplexEnd, fail: duplexFail }) => {
-
-      let duplexStarted = false;
-      let duplexPaused = true;
-      let duplexNeedsDrain = false;
-
-      let virtualOutputNeedsDrain = false;
-      let virtualOutputDrain: (() => void) | undefined = undefined;
-
-      let virtualInputPaused = true;
-      let virtualInputNext: ((args: { chunks: T[] }) => void) | undefined = undefined;
-      let virtualInputEnd: (() => void) | undefined = undefined;
-
-      const input = source<T>({
-        open: ({ next, end }) => {
-
-          virtualInputNext = next;
-          virtualInputEnd = end;
-
-          return {
-            pause: () => {
-              virtualInputPaused = true;
-            },
-
-            resume: () => {
-              virtualInputPaused = false;
-
-              if (duplexNeedsDrain) {
-                duplexNeedsDrain = false;
-                duplexDrain();
-              }
-            },
-
-            destroy: () => {
-              // unused
-            }
-          };
-        }
-      });
-
-      const output = sink<U>({
-        open: ({ drain }) => {
-          virtualOutputDrain = drain;
-
-          return {
-            write: ({ chunks }) => {
-              if (!duplexStarted) {
-                throw Error("write before first resume, expected, please implement");
-              }
-
-              duplexNext({ chunks });
-
-              const takesMore = !duplexPaused;
-              if (!takesMore) {
-                virtualOutputNeedsDrain = true;
-              }
-
-              return {
-                takesMore
-              };
-            },
-
-            finish: ({ done }) => {
-              console.log("virtual pipeline sink finished");
-              done();
-            },
-
-            destroy: () => {
-              // unused
-            }
-          };
-        }
-      });
-
-      const pipelineNetwork = open({
-        input,
-        output
-      });
-
-      let doneCallback: (() => void) | undefined = undefined;
-
-      const pipelineNetworkStream = pipelineNetwork.stream({
-        done: () => {
-          duplexEnd();
-          doneCallback!();
-        },
-
-        failed: ({ error }) => {
-          duplexFail({ error });
-        }
-      });
-
-      return {
-        write: ({ chunks }) => {
-          if (!duplexStarted) {
-            throw Error("BUG: write before first resume, expected, please implement");
-          }
-
-          virtualInputNext!({ chunks });
-
-          const takesMore = !virtualInputPaused;
-          if (!takesMore) {
-            duplexNeedsDrain = true;
-          }
-
-          return {
-            takesMore
-          };
-        },
-
-        finish: ({ done }) => {
-          doneCallback = done;
-          virtualInputEnd!();
-        },
-
-        pause: () => {
-          duplexPaused = true;
-        },
-
-        resume: () => {
-          duplexStarted = true;
-          duplexPaused = false;
-
-          if (virtualOutputNeedsDrain) {
-            virtualOutputNeedsDrain = false;
-            virtualOutputDrain!();
-          }
-        },
-
-        destroy: () => {
-          if (pipelineNetworkStream !== undefined) {
-            pipelineNetworkStream.destroy();
-          }
-        }
-      };
-    }
-  });
-};
-
-const chain = <SourceChunk extends TStreamChunk>({ from }: { from: ISourceStreamFactory<SourceChunk> }) => {
-
-  const via = <T extends TStreamChunk> ({ transform }: { transform: IDuplexStreamFactory<SourceChunk, T> }) => {
-
-    const end = ({ to }: { to: ISinkStreamFactory<T> }) => {
-    };
-
-    return {
-      end
-    };
-  };
-
-  return {
-    via
-  };
-};
-
 export {
-  create,
-  createLinear,
-
-  pipelineSource,
-  pipelineSink,
-  pipelineTransform,
-
-  chain
+  pipeline,
+  createPipelineNetwork
 };

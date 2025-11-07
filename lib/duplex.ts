@@ -2,46 +2,35 @@
 /* eslint-disable max-statements */
 
 import type {
-  IStreamFactory,
   TStreamChunk,
-  TStreamError
+  TStreamError,
 } from "./stream.ts";
-import type { ISourceStream } from "./source.ts";
-import type { ISinkStream } from "./sink.ts";
+import type { TSourceStream, TSourceStreamFactoryOptions } from "./source.ts";
+import type { TSinkStream, TSinkStreamFactoryOptions } from "./sink.ts";
 import {
   StreamAlreadyDestroyedError,
   StreamAlreadyEndedError,
   StreamAlreadyFailedError,
   StreamAlreadyOpenedError,
-  StreamAlreadyPausedError,
-  StreamNotPausedError,
   StreamAlreadyFinishingError,
   StreamAlreadyFinishedError,
   StreamDuplexLoopError,
   StreamReentrancyError,
-  StreamCallbackDuringPauseError,
-  StreamResumeDuringNextError,
-  StreamDrainDuringWriteError
 } from "./errors.ts";
 
-interface IDuplexStream<T extends TStreamChunk, U extends TStreamChunk> extends ISourceStream<U>, ISinkStream<T> { };
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+type TDuplexStream<T extends TStreamChunk, U extends TStreamChunk> = TSinkStream<T> & TSourceStream;
 
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
-interface IDuplexStreamFactoryOptions<T extends TStreamChunk, U extends TStreamChunk> {
-  fail: (args: { error: TStreamError }) => void;
-  next: (args: { chunks: U[] }) => void;
-  end: () => void;
-  drain: () => void;
+type TDuplexStreamFactoryOptions<T extends TStreamChunk, U extends TStreamChunk> = TSinkStreamFactoryOptions & TSourceStreamFactoryOptions<U>;
+
+type TDuplexStreamFactory<T extends TStreamChunk, U extends TStreamChunk> = {
+  openDuplex: (options: TDuplexStreamFactoryOptions<T, U>) => TDuplexStream<T, U>;
 };
 
-interface IDuplexStreamFactory<T extends TStreamChunk, U extends TStreamChunk> extends IStreamFactory {
-  open: (options: IDuplexStreamFactoryOptions<T, U>) => IDuplexStream<T, U>;
-};
-
-const duplex = <T extends TStreamChunk, U extends TStreamChunk>({ open }: IDuplexStreamFactory<T, U>): IDuplexStreamFactory<T, U> => {
+const duplex = <T extends TStreamChunk, U extends TStreamChunk>({ openDuplex }: TDuplexStreamFactory<T, U>): TDuplexStreamFactory<T, U> => {
 
   let opened = false;
-  let paused = true;
   let failed = false;
   let destroyed = false;
   let ended = false;
@@ -50,16 +39,14 @@ const duplex = <T extends TStreamChunk, U extends TStreamChunk>({ open }: IDuple
   let finished = false;
 
   let writeEntered = false;
-  let drainEntered = false;
+  let backpressureEntered = false;
   let nextEntered = false;
-  let resumeEntered = false;
-  let pauseEntered = false;
 
   return {
-    open: ({
+    openDuplex: ({
       next: providedNext,
       end: providedEnd,
-      drain: providedDrain,
+      backpressure: providedBackpressure,
       fail: providedFail
     }) => {
       if (opened) {
@@ -78,7 +65,7 @@ const duplex = <T extends TStreamChunk, U extends TStreamChunk>({ open }: IDuple
         }
 
         if (!ready) {
-          throw Error(`cannot write to a stream that never has been resumed`);
+          throw Error(`cannot write during opening of the stream`);
         }
 
         if (ended) {
@@ -91,10 +78,6 @@ const duplex = <T extends TStreamChunk, U extends TStreamChunk>({ open }: IDuple
 
         if (nextEntered) {
           throw StreamReentrancyError({ message: `next: reentrancy detected` });
-        }
-
-        if (pauseEntered) {
-          throw StreamCallbackDuringPauseError({ message: `next: callbacks not allowed inside a pause call` });
         }
 
         nextEntered = true;
@@ -115,56 +98,15 @@ const duplex = <T extends TStreamChunk, U extends TStreamChunk>({ open }: IDuple
         }
 
         if (!ready) {
-          throw Error(`cannot end a stream that never has been resumed`);
+          throw Error(`cannot end during opening of the stream`);
         }
 
         if (ended) {
           throw StreamAlreadyEndedError({ message: `end: cannot end an already ended stream` });
         }
 
-        if (pauseEntered) {
-          throw StreamCallbackDuringPauseError({ message: `end: callbacks not allowed inside a pause call` });
-        }
-
         ended = true;
         providedEnd();
-      };
-
-      const drain = () => {
-        if (failed) {
-          throw StreamAlreadyFailedError({ message: `drain: cannot drain a stream that is already failed` });
-        }
-
-        if (destroyed) {
-          throw StreamAlreadyDestroyedError({ message: `drain: cannot drain a stream that is already destroyed` });
-        }
-
-        if (finishing) {
-          throw StreamAlreadyFinishingError({ message: `drain: cannot drain a stream that is finishing` });
-        }
-
-        if (finished) {
-          throw StreamAlreadyFinishedError({ message: `drain: cannot drain a stream that is already finished` });
-        }
-
-        if (drainEntered) {
-          throw StreamReentrancyError({ message: `drain: reentrancy detected` });
-        }
-
-        if (pauseEntered) {
-          throw StreamCallbackDuringPauseError({ message: `drain: callbacks not allowed inside a pause call` });
-        }
-
-        if (writeEntered) {
-          throw StreamDrainDuringWriteError({ message: `drain: cannot drain during write` });
-        }
-
-        drainEntered = true;
-        try {
-          providedDrain();
-        } finally {
-          drainEntered = false;
-        }
       };
 
       const fail = ({ error }: { error: TStreamError }) => {
@@ -184,83 +126,69 @@ const duplex = <T extends TStreamChunk, U extends TStreamChunk>({ open }: IDuple
           throw Error(`cannot fail a stream with an undefined error`);
         }
 
-        if (pauseEntered) {
-          throw StreamCallbackDuringPauseError({ message: `fail: callbacks not allowed inside a pause call` });
-        }
-
         failed = true;
         providedFail({ error });
       };
 
-      const { pause, resume, write, finish, destroy } = open({ next, end, drain, fail });
+      const backpressure = ({ pressure }: { pressure: number }) => {
+        if (pressure < 0 || pressure > 1) {
+          throw Error(`backpressure: pressure must be between 0 and 1`);
+        }
+
+        if (failed) {
+          throw StreamAlreadyFailedError({ message: `backpressure: cannot backpressure a stream that is already failed` });
+        }
+
+        if (destroyed) {
+          throw StreamAlreadyDestroyedError({ message: `backpressure: cannot backpressure a stream that is already destroyed` });
+        }
+
+        if (ended) {
+          throw StreamAlreadyEndedError({ message: `backpressure: cannot backpressure a stream that is already ended` });
+        }
+
+        providedBackpressure({ pressure });
+      };
+
+      const { backpressure: backpressureImpl, write, finish, destroy } = openDuplex({ next, end, backpressure, fail });
+      ready = true;
 
       return {
-        pause: () => {
-          if (destroyed) {
-            throw StreamAlreadyDestroyedError({ message: `pause: cannot pause a destroyed stream` });
+
+        backpressure: ({ pressure }) => {
+          if (pressure < 0 || pressure > 1) {
+            throw Error(`backpressure: pressure must be between 0 and 1`);
           }
 
           if (failed) {
-            throw StreamAlreadyFailedError({ message: `pause: cannot pause a failed stream` });
+            throw StreamAlreadyFailedError({ message: `backpressure: cannot backpressure a stream that is already failed` });
           }
 
-          if (paused) {
-            throw StreamAlreadyPausedError({ message: `pause: cannot pause a stream that is already paused` });
-          }
-
-          if (ended) {
-            throw StreamAlreadyEndedError({ message: `pause: cannot pause an ended stream` });
-          }
-
-          if (pauseEntered) {
-            throw StreamReentrancyError({ message: `pause: reentrancy detected` });
-          }
-
-          pauseEntered = true;
-          paused = true;
-
-          try {
-            pause();
-          } finally {
-            pauseEntered = false;
-          }
-        },
-
-        resume: () => {
           if (destroyed) {
-            throw StreamAlreadyDestroyedError({ message: `resume: cannot resume a destroyed stream` });
+            throw StreamAlreadyDestroyedError({ message: `backpressure: cannot backpressure a stream that is already destroyed` });
           }
 
-          if (failed) {
-            throw StreamAlreadyFailedError({ message: `resume: cannot resume a failed stream` });
+          if (finishing) {
+            throw StreamAlreadyFinishingError({ message: `backpressure: cannot backpressure a stream that is finishing` });
           }
 
-          if (ended) {
-            throw StreamAlreadyEndedError({ message: `resume: cannot resume an ended stream` });
+          if (finished) {
+            throw StreamAlreadyFinishedError({ message: `backpressure: cannot backpressure a stream that is already finished` });
           }
 
-          if (!paused) {
-            throw StreamNotPausedError({ message: `resume: cannot resume a stream that is not paused` });
+          if (backpressureEntered) {
+            throw StreamReentrancyError({ message: `backpressure: reentrancy detected` });
           }
 
-          if (resumeEntered) {
-            throw StreamReentrancyError({ message: `resume: reentrancy detected` });
-          }
-
-          if (nextEntered) {
-            throw StreamResumeDuringNextError({ message: `resume: cannot resume a stream from within next callback` });
-          }
-
-          resumeEntered = true;
-          paused = false;
-          ready = true;
+          backpressureEntered = true;
 
           try {
-            resume();
+            backpressureImpl({ pressure });
           } finally {
-            resumeEntered = false;
+            backpressureEntered = false;
           }
         },
+
 
         write: ({ chunks }) => {
           if (failed) {
@@ -357,216 +285,13 @@ const duplex = <T extends TStreamChunk, U extends TStreamChunk>({ open }: IDuple
   };
 };
 
-const syncTransform = <T extends TStreamChunk, U extends TStreamChunk>({
-  start = () => ({ error: undefined, chunks: [] }),
-  transform,
-  finish = () => ({ error: undefined, chunks: [] }),
-  thresholdMin = 20,
-  thresholdMax = 100,
-  maxPerTurn = Infinity
-}: {
-  start?: () => { error?: TStreamError, chunks?: U[] }
-  transform: ({ chunks }: { chunks: T[] }) => { error?: TStreamError, chunks?: U[] },
-  finish?: () => { error?: TStreamError, chunks?: U[] },
-  thresholdMin?: number,
-  thresholdMax?: number,
-  maxPerTurn?: number
-}) => {
-  return duplex<T, U>({
-    open: ({ next, end, drain, fail }) => {
-
-      let ready = false;
-      let finished = false;
-      let destroyed = false;
-      let failed = false;
-      let paused = false;
-      let ended = false;
-      let started = false;
-
-      let doneCallback: (() => void) | undefined = undefined;
-
-      let bufferedChunks: T[] = [];
-      let timeoutHandleNextTurn: NodeJS.Timeout | number | undefined = undefined;
-
-      let producerWaitsForDrain = false;
-
-      const processResult = ({ result }: { result: { error?: TStreamError, chunks?: U[] } }) => {
-        if (result.error === undefined && result.chunks === undefined) {
-          throw Error("sync transform must return error or chunks");
-        }
-
-        if (result.error !== undefined) {
-          failed = true;
-          fail({ error: result.error });
-          return;
-        }
-
-        const chunksToForward = result.chunks!;
-
-        if (chunksToForward.length > 0) {
-          next({ chunks: chunksToForward });
-        }
-      };
-
-      const maybeSendNext = () => {
-        if (failed) {
-          throw Error("BUG: maybeSendNext called altough already failed");
-        }
-
-        if (ended) {
-          throw Error("BUG: maybeSendNext called altough already ended");
-        }
-
-        if (destroyed) {
-          throw Error("BUG: maybeSendNext called altough already destroyed");
-        }
-
-        if (!ready) {
-          return;
-        }
-
-        if (!started) {
-          started = true;
-
-          const result = start();
-          processResult({ result });
-
-          if (destroyed) {
-            return;
-          }
-        }
-
-        const chunks = bufferedChunks.slice(0, maxPerTurn);
-        bufferedChunks = bufferedChunks.slice(maxPerTurn);
-
-        if (chunks.length > 0) {
-          const result = transform({ chunks });
-          processResult({ result });
-
-          if (destroyed) {
-            return;
-          }
-        }
-
-        // make sure countProcessedThisTurn is reset to 0 in next task
-        if (bufferedChunks.length > 0 && timeoutHandleNextTurn === undefined) {
-          timeoutHandleNextTurn = setTimeout(() => {
-            timeoutHandleNextTurn = undefined;
-
-            // if our lifecycle ended in the meantime, do nothing
-            if (destroyed || failed || ended) {
-              return;
-            }
-
-            maybeSendNext();
-          }, 0);
-        }
-
-        // maybe send drain event to producer
-        const wantsData = !paused && bufferedChunks.length < thresholdMax;
-        if (producerWaitsForDrain && wantsData) {
-          drain();
-          producerWaitsForDrain = false;
-        }
-
-        if (destroyed || failed) {
-          return;
-        }
-
-        if (bufferedChunks.length === 0 && finished) {
-          const result = finish();
-          processResult({ result });
-
-          if (destroyed) {
-            return;
-          }
-
-          ended = true;
-          end();
-
-          if (destroyed) {
-            return;
-          }
-
-          doneCallback!();
-        }
-      };
-
-      return {
-        pause: () => {
-          if (failed || destroyed) {
-            throw Error("cannot pause a failed or destroyed stream");
-          }
-
-          paused = true;
-        },
-
-        resume: () => {
-          if (failed || destroyed) {
-            throw Error("cannot resume a failed or destroyed stream");
-          }
-
-          ready = true;
-          paused = false;
-          maybeSendNext();
-        },
-
-        write: ({ chunks }) => {
-
-          if (failed || destroyed) {
-            throw Error("cannot write to a failed or destroyed stream");
-          }
-
-          bufferedChunks = [...bufferedChunks, ...chunks];
-          maybeSendNext();
-
-          const limit = producerWaitsForDrain ? thresholdMin : thresholdMax;
-
-          const takesMore = !paused && bufferedChunks.length < limit;
-
-          if (!takesMore) {
-            producerWaitsForDrain = true;
-          }
-
-          return {
-            takesMore
-          };
-        },
-
-        finish: ({ done }) => {
-          if (failed || destroyed) {
-            throw Error("cannot finish a failed or destroyed stream");
-          }
-
-          // console.log(`sync transform ${name} finished`);
-          finished = true;
-          producerWaitsForDrain = false;
-
-          doneCallback = done;
-
-          maybeSendNext();
-        },
-
-        destroy: () => {
-          if (failed || destroyed) {
-            throw Error("cannot destroy a failed or destroyed stream");
-          }
-
-          destroyed = true;
-          clearTimeout(timeoutHandleNextTurn);
-        }
-      };
-    }
-  });
-};
 
 export type {
-  IDuplexStream,
-  IDuplexStreamFactoryOptions,
-  IDuplexStreamFactory
+  TDuplexStream,
+  TDuplexStreamFactoryOptions,
+  TDuplexStreamFactory
 };
 
 export {
   duplex,
-  syncTransform
 };

@@ -1,15 +1,18 @@
-enum ELogLevel {
-  DEBUG,
-  INFO,
-  ERROR
-};
+const ELogLevel = {
+  DEBUG: "DEBUG",
+  INFO: "INFO",
+  ERROR: "ERROR"
+} as const;
+
+type TELogLevel = typeof ELogLevel[keyof typeof ELogLevel];
 
 interface ILogger {
-  log: (args: { level: ELogLevel, message: string }) => void;
+  log: (args: { level: TELogLevel, message: string }) => void;
 };
 
 export type {
-  ILogger
+  ILogger,
+  TELogLevel
 };
 
 export {

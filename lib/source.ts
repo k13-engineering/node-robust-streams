@@ -6,72 +6,64 @@ import {
   StreamAlreadyEndedError,
   StreamAlreadyFailedError,
   StreamAlreadyOpenedError,
-  StreamAlreadyPausedError,
-  StreamNotPausedError,
+  StreamCallbackDuringBackpressureError,
   StreamReentrancyError,
-  StreamResumeDuringNextError,
-  StreamCallbackDuringPauseError
 } from "./errors.ts";
 
 import type {
-  IStreamFactory,
-  IStream,
+  TStreamBackpressureFunc,
   TStreamChunk,
-  TStreamError
+  TStreamError,
+  TStreamFailFunc
 } from "./stream.ts";
 
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-interface ISourceStream<T extends TStreamChunk> extends IStream {
-  pause: () => void;
-  resume: () => void;
+type TSourceStream = {
+  destroy: () => void;
+  backpressure: TStreamBackpressureFunc;
 };
 
-interface ISourceStreamFactoryOptions<T extends TStreamChunk> {
+type TSourceStreamFactoryOptions<T extends TStreamChunk> = {
   next: ({ chunks }: { chunks: T[] }) => void;
   end: () => void;
-  fail: ({ error }: { error: globalThis.Error }) => void;
+  fail: TStreamFailFunc;
 };
 
-interface ISourceStreamFactory<T extends TStreamChunk> extends IStreamFactory {
-  open: (options: ISourceStreamFactoryOptions<T>) => ISourceStream<T>;
+type TSourceStreamFactory<T extends TStreamChunk> = {
+  openSourceStream: (options: TSourceStreamFactoryOptions<T>) => TSourceStream;
 };
 
-const source = <T extends TStreamChunk>({ open }: ISourceStreamFactory<T>): ISourceStreamFactory<T> => {
+const source = <T extends TStreamChunk>({ openSourceStream }: TSourceStreamFactory<T>): TSourceStreamFactory<T> => {
   let opened = false;
-  let paused = true;
   let failed = false;
   let destroyed = false;
   let ended = false;
-  let ready = false;
 
   let nextEntered = false;
   let endEntered = false;
   let failEntered = false;
-  let pauseEntered = false;
-  let resumeEntered = false;
+  let backpressureEntered = false;
   let destroyEntered = false;
 
   return {
 
-    open: ({ next: providedNext, end: providedEnd, fail: providedFail }) => {
+    openSourceStream: ({ next: providedNext, end: providedEnd, fail: providedFail }) => {
 
       if (opened) {
         throw StreamAlreadyOpenedError({ message: `cannot open a stream that is already open` });
       }
 
-      opened = true;
-
       const next = ({ chunks }: { chunks: T[] }) => {
+
+        if (!opened) {
+          throw Error(`cannot call next before open returns`);
+        }
+
         if (destroyed) {
           throw StreamAlreadyDestroyedError({ message: `next: cannot write to a destroyed stream` });
         }
 
         if (failed) {
           throw StreamAlreadyFailedError({ message: `next: cannot write to a failed stream` });
-        }
-
-        if (!ready) {
-          throw Error(`cannot write to a stream that never has been resumed`);
         }
 
         if (ended) {
@@ -82,8 +74,8 @@ const source = <T extends TStreamChunk>({ open }: ISourceStreamFactory<T>): ISou
           throw Error(`cannot write an empty chunk array`);
         }
 
-        if (pauseEntered) {
-          throw StreamCallbackDuringPauseError({ message: `next: callbacks not allowed inside a pause call` });
+        if (backpressureEntered) {
+          throw StreamCallbackDuringBackpressureError({ message: `next: callbacks not allowed inside a backpressure call` });
         }
 
         if (nextEntered) {
@@ -99,6 +91,11 @@ const source = <T extends TStreamChunk>({ open }: ISourceStreamFactory<T>): ISou
       };
 
       const end = () => {
+
+        if (!opened) {
+          throw Error(`cannot call end before open returns`);
+        }
+
         if (destroyed) {
           throw StreamAlreadyDestroyedError({ message: `end: cannot end a destroyed stream` });
         }
@@ -107,16 +104,12 @@ const source = <T extends TStreamChunk>({ open }: ISourceStreamFactory<T>): ISou
           throw StreamAlreadyFailedError({ message: `end: cannot end a failed stream` });
         }
 
-        if (!ready) {
-          throw Error(`cannot end a stream that never has been resumed`);
-        }
-
         if (ended) {
           throw StreamAlreadyEndedError({ message: `end: cannot end an already ended stream` });
         }
 
-        if (pauseEntered) {
-          throw StreamCallbackDuringPauseError({ message: `end: callbacks not allowed inside a pause call` });
+        if (backpressureEntered) {
+          throw StreamCallbackDuringBackpressureError({ message: `end: callbacks not allowed inside a backpressure call` });
         }
 
         // resume is allowed
@@ -151,8 +144,8 @@ const source = <T extends TStreamChunk>({ open }: ISourceStreamFactory<T>): ISou
           throw Error(`cannot fail a stream with an undefined error`);
         }
 
-        if (pauseEntered) {
-          throw StreamCallbackDuringPauseError({ message: `fail: callbacks not allowed inside a pause call` });
+        if (backpressureEntered) {
+          throw StreamCallbackDuringBackpressureError({ message: `fail: callbacks not allowed inside a backpressure call` });
         }
 
         // resume is allowed
@@ -170,79 +163,46 @@ const source = <T extends TStreamChunk>({ open }: ISourceStreamFactory<T>): ISou
         }
       };
 
+      const { backpressure, destroy } = openSourceStream({ next, end, fail });
       opened = true;
-      const { pause, resume, destroy } = open({ next, end, fail });
 
       return {
-        pause: () => {
+
+        backpressure: ({ pressure }: { pressure: number }) => {
           if (destroyed) {
-            throw StreamAlreadyDestroyedError({ message: `pause: cannot pause a destroyed stream` });
+            throw StreamAlreadyDestroyedError({ message: `backpressure: cannot signal backpressure on a destroyed stream` });
           }
 
           if (failed) {
-            throw StreamAlreadyFailedError({ message: `pause: cannot pause a failed stream` });
-          }
-
-          if (paused) {
-            throw StreamAlreadyPausedError({ message: `pause: cannot pause a stream that is already paused` });
+            throw StreamAlreadyFailedError({ message: `backpressure: cannot signal backpressure on a failed stream` });
           }
 
           if (ended) {
-            throw StreamAlreadyEndedError({ message: `pause: cannot pause an ended stream` });
+            throw StreamAlreadyEndedError({ message: `backpressure: cannot signal backpressure on an ended stream` });
           }
 
-          // resume and next is allowed
-          if (endEntered || failEntered || destroyEntered) {
-            throw StreamReentrancyError({ message: `pause: reentrancy detected` });
+          if (backpressureEntered) {
+            throw StreamReentrancyError({ message: `backpressure: reentrancy detected` });
           }
 
-          pauseEntered = true;
-          paused = true;
+          if (endEntered) {
+            throw StreamReentrancyError({ message: `backpressure: reentrancy detected` });
+          }
+
+          if (failEntered) {
+            throw StreamReentrancyError({ message: `backpressure: reentrancy detected` });
+          }
+
+          if (destroyEntered) {
+            throw StreamReentrancyError({ message: `backpressure: reentrancy detected` });
+          }
+
+          backpressureEntered = true;
 
           try {
-            pause();
+            backpressure({ pressure });
           } finally {
-            pauseEntered = false;
-          }
-        },
-
-        resume: () => {
-          if (destroyed) {
-            throw StreamAlreadyDestroyedError({ message: `resume: cannot resume a destroyed stream` });
-          }
-
-          if (failed) {
-            throw StreamAlreadyFailedError({ message: `resume: cannot resume a failed stream` });
-          }
-
-          if (ended) {
-            throw StreamAlreadyEndedError({ message: `resume: cannot resume an ended stream` });
-          }
-
-          if (!paused) {
-            throw StreamNotPausedError({ message: `resume: cannot resume a stream that is not paused` });
-          }
-
-          if (nextEntered) {
-            throw StreamResumeDuringNextError({ message: `resume: cannot resume a stream during a next call` });
-          }
-
-          if (pauseEntered) {
-            throw StreamReentrancyError({ message: `resume: reentrancy detected` });
-          }
-
-          if (resumeEntered) {
-            throw StreamReentrancyError({ message: `resume: reentrancy detected` });
-          }
-
-          resumeEntered = true;
-          paused = false;
-          ready = true;
-
-          try {
-            resume();
-          } finally {
-            resumeEntered = false;
+            backpressureEntered = false;
           }
         },
 
@@ -260,7 +220,6 @@ const source = <T extends TStreamChunk>({ open }: ISourceStreamFactory<T>): ISou
           }
 
           destroyEntered = true;
-          paused = true;
           destroyed = true;
 
           try {
@@ -276,83 +235,15 @@ const source = <T extends TStreamChunk>({ open }: ISourceStreamFactory<T>): ISou
 
 const errorSource = ({ error }: { error: TStreamError }) => {
   return source({
-    open: ({ fail }) => {
+    openSourceStream: ({ fail }) => {
       fail({ error });
 
       return {
-        pause: () => {
-          // unused
-        },
-
-        resume: () => {
-          // unused
+        backpressure: () => {
         },
 
         destroy: () => {
           // unused
-        }
-      };
-    }
-  });
-};
-
-const sourceFromString = ({ data, chunkSize }: { data: string, chunkSize?: number }) => {
-  let destroyed = false;
-
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  const chunkSizeToUse = chunkSize || data.length;
-
-  return source<string>({
-    open: ({ next, end }) => {
-
-      return {
-        pause: () => {
-          // unused
-        },
-
-        resume: () => {
-          next({ chunks: [data] });
-
-          if (destroyed) {
-            return;
-          }
-
-          end();
-        },
-
-        destroy: () => {
-          destroyed = true;
-        }
-      };
-    }
-  });
-};
-
-const sourceFromChunks = <T extends TStreamChunk>({ chunks }: { chunks: T[] }) => {
-  let destroyed = false;
-
-  return source<T>({
-    open: ({ next, end }) => {
-
-      return {
-        pause: () => {
-          // unused
-        },
-
-        resume: () => {
-          if (chunks.length > 0) {
-            next({ chunks });
-
-            if (destroyed) {
-              return;
-            }
-          }
-
-          end();
-        },
-
-        destroy: () => {
-          destroyed = true;
         }
       };
     }
@@ -360,14 +251,12 @@ const sourceFromChunks = <T extends TStreamChunk>({ chunks }: { chunks: T[] }) =
 };
 
 export type {
-  ISourceStream,
-  ISourceStreamFactory,
-  ISourceStreamFactoryOptions
+  TSourceStream,
+  TSourceStreamFactory,
+  TSourceStreamFactoryOptions,
 };
 
 export {
   source,
-  errorSource,
-  sourceFromString,
-  sourceFromChunks
+  errorSource
 };
