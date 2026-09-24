@@ -17,10 +17,7 @@ const transform = syncTransform<string, string>({
 });
 
 const transform2 = syncTransform<string, number>({
-  transform: ({ chunks }) => {
-
-    chunks;
-
+  transform: () => {
     return {
       error: undefined,
       chunks: [1]

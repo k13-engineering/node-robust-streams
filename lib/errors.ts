@@ -8,16 +8,17 @@ const makeError = (nameObject: object): ErrorFactory => {
 
   const weakSetInstances = new WeakSet();
 
-  const errorFactory = ({ message }: { message: string }) => {
+  const errorFactory = Object.assign(({ message }: { message: string }) => {
     const err = Error(message);
+    // eslint-disable-next-line immutable/no-mutation
     err.name = name;
     weakSetInstances.add(err);
     return err;
-  };
-
-  errorFactory.isInstance = (err: object) => {
-    return weakSetInstances.has(err);
-  };
+  }, {
+    isInstance: (err: object) => {
+      return weakSetInstances.has(err);
+    }
+  });
 
   return errorFactory;
 };

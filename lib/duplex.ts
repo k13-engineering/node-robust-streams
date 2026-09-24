@@ -22,7 +22,8 @@ import {
 type TDuplexStream<T extends TStreamChunk, U extends TStreamChunk> = TSinkStream<T> & TSourceStream;
 
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
-type TDuplexStreamFactoryOptions<T extends TStreamChunk, U extends TStreamChunk> = TSinkStreamFactoryOptions & TSourceStreamFactoryOptions<U>;
+type TDuplexStreamFactoryOptions<T extends TStreamChunk, U extends TStreamChunk> =
+  TSinkStreamFactoryOptions & TSourceStreamFactoryOptions<U>;
 
 type TDuplexStreamFactory<T extends TStreamChunk, U extends TStreamChunk> = {
   openDuplex: (options: TDuplexStreamFactoryOptions<T, U>) => TDuplexStream<T, U>;

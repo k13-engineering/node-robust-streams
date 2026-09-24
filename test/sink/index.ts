@@ -1,6 +1,6 @@
 import assert from "node:assert";
 
-import { ITestGroup } from "ya-test-library";
+import type { ITestGroup } from "ya-test-library";
 
 import { sink } from "../../lib/sink.ts";
 import {
@@ -12,23 +12,22 @@ import {
 import { sinkReentrancyTestGroup } from "./reentrancy.ts";
 
 const createDummySinkStream = () => {
-  let capturedDrain: (() => void) | undefined = undefined;
+  let capturedBackpressure: ((args: { pressure: number }) => void) | undefined = undefined;
   let capturedFail: ((args: { error: Error }) => void) | undefined = undefined;
   let capturedDone: (() => void) | undefined = undefined;
 
   const sinkFactory = sink({
-    open: ({ drain, fail }) => {
-      capturedDrain = drain;
+    openSinkStream: ({ backpressure, fail }) => {
+      capturedBackpressure = backpressure;
       capturedFail = fail;
 
       return {
         write: () => {
-          return {
-            takesMore: true
-          };
+          return undefined;
         },
         finish: ({ done }) => {
           capturedDone = done;
+          return undefined;
         },
         destroy: () => { },
       };
@@ -37,20 +36,20 @@ const createDummySinkStream = () => {
 
   let state = {
     calls: {
-      drain: [] as undefined[],
+      backpressure: [] as { pressure: number }[],
       fail: [] as { error: Error }[],
     }
   };
 
-  const sinkStream = sinkFactory.open({
-    drain: () => {
+  const sinkStream = sinkFactory.openSinkStream({
+    backpressure: ({ pressure }) => {
       state = {
         ...state,
         calls: {
           ...state.calls,
-          drain: [
-            ...state.calls.drain,
-            undefined
+          backpressure: [
+            ...state.calls.backpressure,
+            { pressure }
           ]
         }
       };
@@ -73,18 +72,20 @@ const createDummySinkStream = () => {
     capturedDone!();
   };
 
-  assert.ok(capturedDrain !== undefined);
+  assert.ok(capturedBackpressure !== undefined);
   assert.ok(capturedFail !== undefined);
 
   return {
     sinkStream,
 
-    drain: capturedDrain! as () => void,
+    backpressure: capturedBackpressure! as (args: { pressure: number }) => void,
     fail: capturedFail! as (args: { error: Error }) => void,
 
     done,
 
-    state: () => state
+    state: () => {
+      return state;
+    }
   };
 };
 
@@ -92,7 +93,7 @@ const createDummySinkStreamInStreamingState = () => {
 
   const {
     sinkStream,
-    drain,
+    backpressure,
     fail,
     state
   } = createDummySinkStream();
@@ -100,7 +101,7 @@ const createDummySinkStreamInStreamingState = () => {
   return {
     sinkStream,
 
-    drain,
+    backpressure,
     fail,
 
     state,
@@ -111,17 +112,17 @@ const createDummySinkStreamInDestroyedState = () => {
 
   const {
     sinkStream,
-    drain,
+    backpressure,
     fail,
     state
   } = createDummySinkStream();
 
-  sinkStream.destroy();
+  sinkStream.destroy({ reason: "test" });
 
   return {
     sinkStream,
 
-    drain,
+    backpressure,
     fail,
 
     state,
@@ -131,7 +132,7 @@ const createDummySinkStreamInDestroyedState = () => {
 const createDummySinkStreamInFinishingState = () => {
   const {
     sinkStream,
-    drain,
+    backpressure,
     fail,
     state
   } = createDummySinkStream();
@@ -141,7 +142,7 @@ const createDummySinkStreamInFinishingState = () => {
   return {
     sinkStream,
 
-    drain,
+    backpressure,
     fail,
 
     state
@@ -151,7 +152,7 @@ const createDummySinkStreamInFinishingState = () => {
 const createDummySinkStreamInFinishedState = () => {
   const {
     sinkStream,
-    drain,
+    backpressure,
     fail,
 
     done,
@@ -165,27 +166,17 @@ const createDummySinkStreamInFinishedState = () => {
   return {
     sinkStream,
 
-    drain,
+    backpressure,
     fail,
 
-    state: () => {
-      const s = state();
-
-      return {
-        ...s,
-        calls: {
-          ...s.calls,
-          drain: s.calls.drain.slice(1)
-        }
-      };
-    },
+    state,
   };
 };
 
 const createDummySinkStreamInFailedState = () => {
   const {
     sinkStream,
-    drain,
+    backpressure,
     fail,
     state
   } = createDummySinkStream();
@@ -195,7 +186,7 @@ const createDummySinkStreamInFailedState = () => {
   return {
     sinkStream,
 
-    drain,
+    backpressure,
     fail,
 
     state: () => {
@@ -212,12 +203,11 @@ const createDummySinkStreamInFailedState = () => {
   };
 };
 
-// [inside] next
-// [inside] end
+// [inside] backpressure
 // [inside] fail
 
-// [outside] pause
-// [outside] resume
+// [outside] write
+// [outside] finish
 // [outside] destroy
 
 const sinkTestGroup: ITestGroup = {
@@ -239,6 +229,21 @@ const sinkTestGroup: ITestGroup = {
           sinkStream.finish({ done: () => { } });
         },
 
+        "should support backpressure": () => {
+          const { backpressure, state } = createDummySinkStreamInStreamingState();
+
+          backpressure({ pressure: 0.5 });
+
+          assert.deepStrictEqual(state(), {
+            calls: {
+              backpressure: [
+                { pressure: 0.5 }
+              ],
+              fail: []
+            }
+          });
+        },
+
         "should support fail": () => {
           const { fail, state } = createDummySinkStreamInStreamingState();
 
@@ -248,7 +253,7 @@ const sinkTestGroup: ITestGroup = {
 
           assert.deepStrictEqual(state(), {
             calls: {
-              drain: [],
+              backpressure: [],
               fail: [
                 { error: testError }
               ]
@@ -258,7 +263,7 @@ const sinkTestGroup: ITestGroup = {
 
         "should support destroy": () => {
           const { sinkStream } = createDummySinkStreamInStreamingState();
-          sinkStream.destroy();
+          sinkStream.destroy({ reason: "test" });
         },
       }
     },
@@ -285,6 +290,16 @@ const sinkTestGroup: ITestGroup = {
           });
         },
 
+        "should throw when backpressure is called": () => {
+          const { backpressure } = createDummySinkStreamInFinishingState();
+
+          assert.throws(() => {
+            backpressure({ pressure: 0 });
+          }, (ex: Error) => {
+            return StreamAlreadyFinishingError.isInstance(ex);
+          });
+        },
+
         "should support fail": () => {
           const { fail, state } = createDummySinkStreamInFinishingState();
 
@@ -294,7 +309,7 @@ const sinkTestGroup: ITestGroup = {
 
           assert.deepStrictEqual(state(), {
             calls: {
-              drain: [],
+              backpressure: [],
               fail: [
                 { error: testError }
               ]
@@ -304,7 +319,7 @@ const sinkTestGroup: ITestGroup = {
 
         "should support destroy": () => {
           const { sinkStream } = createDummySinkStreamInFinishingState();
-          sinkStream.destroy();
+          sinkStream.destroy({ reason: "test" });
         },
       }
     },
@@ -331,6 +346,16 @@ const sinkTestGroup: ITestGroup = {
           });
         },
 
+        "should throw when backpressure is called": () => {
+          const { backpressure } = createDummySinkStreamInFinishedState();
+
+          assert.throws(() => {
+            backpressure({ pressure: 0 });
+          }, (ex: Error) => {
+            return StreamAlreadyFinishedError.isInstance(ex);
+          });
+        },
+
         "should throw when fail is called": () => {
           const { fail } = createDummySinkStreamInFinishedState();
 
@@ -347,7 +372,7 @@ const sinkTestGroup: ITestGroup = {
           const { sinkStream } = createDummySinkStreamInFinishedState();
 
           assert.throws(() => {
-            sinkStream.destroy();
+            sinkStream.destroy({ reason: "test" });
           }, (ex: Error) => {
             return StreamAlreadyFinishedError.isInstance(ex);
           });
@@ -377,6 +402,16 @@ const sinkTestGroup: ITestGroup = {
           });
         },
 
+        "should throw when backpressure is called": () => {
+          const { backpressure } = createDummySinkStreamInFailedState();
+
+          assert.throws(() => {
+            backpressure({ pressure: 0 });
+          }, (ex: Error) => {
+            return StreamAlreadyFailedError.isInstance(ex);
+          });
+        },
+
         "should throw when fail is called": () => {
           const { fail } = createDummySinkStreamInFailedState();
 
@@ -393,7 +428,7 @@ const sinkTestGroup: ITestGroup = {
           const { sinkStream } = createDummySinkStreamInFailedState();
 
           assert.throws(() => {
-            sinkStream.destroy();
+            sinkStream.destroy({ reason: "test" });
           }, (ex: Error) => {
             return StreamAlreadyFailedError.isInstance(ex);
           });
@@ -423,6 +458,16 @@ const sinkTestGroup: ITestGroup = {
           });
         },
 
+        "should throw when backpressure is called": () => {
+          const { backpressure } = createDummySinkStreamInDestroyedState();
+
+          assert.throws(() => {
+            backpressure({ pressure: 0 });
+          }, (ex: Error) => {
+            return StreamAlreadyDestroyedError.isInstance(ex);
+          });
+        },
+
         "should throw when fail is called": () => {
           const { fail } = createDummySinkStreamInDestroyedState();
 
@@ -436,7 +481,7 @@ const sinkTestGroup: ITestGroup = {
         "should throw on calls to destroy": () => {
           const { sinkStream } = createDummySinkStreamInDestroyedState();
           assert.throws(() => {
-            sinkStream.destroy();
+            sinkStream.destroy({ reason: "test" });
           }, (ex: Error) => {
             return StreamAlreadyDestroyedError.isInstance(ex);
           });
@@ -465,35 +510,49 @@ const sinkTestGroup: ITestGroup = {
     //     });
     // },
 
-    // "should throw when opened more than once": () => {
-    //     const sourceFactory = source({
-    //         open: () => {
-    //             return {
-    //                 pause: () => { },
-    //                 resume: () => { },
-    //                 destroy: () => { }
-    //             };
-    //         }
-    //     });
-
-    //     sourceFactory.open({
-    //         next: () => { },
-    //         end: () => { },
-    //         fail: () => { }
-    //     });
-
-    //     assert.throws(() => {
-    //         sourceFactory.open({
-    //             next: () => { },
-    //             end: () => { },
-    //             fail: () => { }
-    //         });
-    //     }, (ex: any) => {
-    //         return ex.message === "cannot open a stream that is already open";
-    //     });
-    // },
-
     "reentrancy": sinkReentrancyTestGroup
+  },
+
+  tests: {
+    "should throw when backpressure is out of range": () => {
+      const { backpressure } = createDummySinkStreamInStreamingState();
+
+      assert.throws(() => {
+        backpressure({ pressure: 1.5 });
+      }, (ex: Error) => {
+        return ex.message === "backpressure: pressure must be between 0 and 1";
+      });
+    },
+
+    "should throw when opened more than once": () => {
+      const sinkFactory = sink({
+        openSinkStream: () => {
+          return {
+            write: () => {
+              return undefined;
+            },
+            finish: () => {
+              return undefined;
+            },
+            destroy: () => { }
+          };
+        }
+      });
+
+      sinkFactory.openSinkStream({
+        backpressure: () => { },
+        fail: () => { }
+      });
+
+      assert.throws(() => {
+        sinkFactory.openSinkStream({
+          backpressure: () => { },
+          fail: () => { }
+        });
+      }, (ex: Error) => {
+        return ex.message === "cannot open a stream that is already open";
+      });
+    },
   }
 };
 

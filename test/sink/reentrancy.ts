@@ -1,25 +1,26 @@
 import assert from "node:assert";
 
-import { ITestGroup } from "../../../ya-test-library/lib/types.ts";
+import type { ITestGroup } from "ya-test-library";
 import {
-  StreamDrainDuringWriteError
+  StreamReentrancyError
 } from "../../lib/errors.ts";
-import { sink, ISinkStream, ISinkStreamFactoryOptions } from "../../lib/sink.ts";
-import { TStreamChunk } from "../../lib/stream.ts";
+import { sink } from "../../lib/sink.ts";
+import type { TSinkStream, TSinkStreamFactoryOptions } from "../../lib/sink.ts";
+import type { TStreamChunk } from "../../lib/stream.ts";
 
 const createDummySinkStream = ({
   streamImpl,
   callbacksImpl
 }: {
-  streamImpl: Partial<ISinkStream<TStreamChunk>>,
-  callbacksImpl: Partial<ISinkStreamFactoryOptions>
+  streamImpl: Partial<TSinkStream<TStreamChunk>>,
+  callbacksImpl: Partial<TSinkStreamFactoryOptions>
 }) => {
-  let capturedDrain: (() => void) | undefined = undefined;
+  let capturedBackpressure: ((args: { pressure: number }) => void) | undefined = undefined;
   let capturedFail: ((args: { error: Error }) => void) | undefined = undefined;
 
   const sinkFactory = sink({
-    open: ({ drain, fail }) => {
-      capturedDrain = drain;
+    openSinkStream: ({ backpressure, fail }) => {
+      capturedBackpressure = backpressure;
       capturedFail = fail;
 
       return {
@@ -29,29 +30,29 @@ const createDummySinkStream = ({
         finish: ({ done }) => {
           return streamImpl.finish!({ done });
         },
-        destroy: () => {
-          return streamImpl.destroy!();
+        destroy: ({ reason }) => {
+          return streamImpl.destroy!({ reason });
         },
       };
     }
   });
 
-  const sinkStream = sinkFactory.open({
-    drain: () => {
-      callbacksImpl.drain!();
+  const sinkStream = sinkFactory.openSinkStream({
+    backpressure: ({ pressure }) => {
+      callbacksImpl.backpressure!({ pressure });
     },
     fail: ({ error }) => {
       callbacksImpl.fail!({ error });
     }
   });
 
-  assert.ok(capturedDrain !== undefined);
+  assert.ok(capturedBackpressure !== undefined);
   assert.ok(capturedFail !== undefined);
 
   return {
     streamApi: sinkStream,
     internalApi: {
-      drain: capturedDrain! as () => void,
+      backpressure: capturedBackpressure! as (args: { pressure: number }) => void,
       fail: capturedFail! as (args: { error: Error }) => void,
     }
   };
@@ -59,44 +60,96 @@ const createDummySinkStream = ({
 
 const sinkReentrancyTestGroup: ITestGroup = {
   tests: {
-    "should allow [internal task] -> drain() -> ... -> write()": () => {
+    "should allow [internal task] -> backpressure() -> ... -> write()": () => {
       const sinkStream = createDummySinkStream({
         streamImpl: {
           write: () => {
-            return { takesMore: true };
+            return undefined;
           }
         },
 
         callbacksImpl: {
-          drain: () => {
+          backpressure: () => {
             sinkStream.streamApi.write({ chunks: ["1", "2", "3"] });
           }
         }
       });
 
-      sinkStream.internalApi.drain();
+      sinkStream.internalApi.backpressure({ pressure: 0 });
     },
 
-    "should throw on [external task] -> write() -> ... -> drain()": () => {
+    "should allow [external task] -> write() -> ... -> backpressure()": () => {
       const sinkStream = createDummySinkStream({
         streamImpl: {
           write: () => {
-            sinkStream.internalApi.drain();
-            return { takesMore: true };
+            sinkStream.internalApi.backpressure({ pressure: 1 });
+            return undefined;
           }
         },
 
         callbacksImpl: {
-          drain: () => {
+          backpressure: () => {
 
           }
         }
       });
 
+      sinkStream.streamApi.write({ chunks: ["1", "2", "3"] });
+    },
+
+    "should throw on [external task] -> write() -> ... -> write()": () => {
+      const sinkStream = createDummySinkStream({
+        streamImpl: {
+          write: ({ chunks }) => {
+            sinkStream.streamApi.write({ chunks });
+            return undefined;
+          }
+        },
+
+        callbacksImpl: {}
+      });
+
       assert.throws(() => {
         sinkStream.streamApi.write({ chunks: ["1", "2", "3"] });
       }, (ex: Error) => {
-        return StreamDrainDuringWriteError.isInstance(ex);
+        return StreamReentrancyError.isInstance(ex);
+      });
+    },
+
+    "should throw on [external task] -> write() -> ... -> finish()": () => {
+      const sinkStream = createDummySinkStream({
+        streamImpl: {
+          write: () => {
+            sinkStream.streamApi.finish({ done: () => { } });
+            return undefined;
+          }
+        },
+
+        callbacksImpl: {}
+      });
+
+      assert.throws(() => {
+        sinkStream.streamApi.write({ chunks: ["1", "2", "3"] });
+      }, (ex: Error) => {
+        return StreamReentrancyError.isInstance(ex);
+      });
+    },
+
+    "should throw on [internal task] -> backpressure() -> ... -> backpressure()": () => {
+      const sinkStream = createDummySinkStream({
+        streamImpl: {},
+
+        callbacksImpl: {
+          backpressure: () => {
+            sinkStream.internalApi.backpressure({ pressure: 1 });
+          }
+        }
+      });
+
+      assert.throws(() => {
+        sinkStream.internalApi.backpressure({ pressure: 0 });
+      }, (ex: Error) => {
+        return StreamReentrancyError.isInstance(ex);
       });
     },
   }

@@ -1,0 +1,31 @@
+{
+  "name": "robust-streams",
+  "type": "module",
+  "description": "Robust Streams library",
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    "dist"
+  ],
+  "main": "dist/lib/index.js",
+  "scripts": {},
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/k13-engineering/node-robust-streams.git"
+  },
+  "keywords": [
+    "streams",
+    "streaming",
+    "source",
+    "sink",
+    "duplex",
+    "pipeline"
+  ],
+  "author": "Simon Kadisch",
+  "license": "LGPL-2.1",
+  "bugs": {
+    "url": "https://github.com/k13-engineering/node-robust-streams/issues"
+  },
+  "homepage": "https://github.com/k13-engineering/node-robust-streams#readme"
+}

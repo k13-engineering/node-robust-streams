@@ -1,36 +1,34 @@
 import assert from "node:assert";
 
-import { ITestGroup } from "../../../ya-test-library/lib/types.ts";
-import { source, ISourceStream, ISourceStreamFactoryOptions } from "../../lib/source.ts";
+import type { ITestGroup } from "ya-test-library";
+import { source } from "../../lib/source.ts";
+import type { TSourceStream, TSourceStreamFactoryOptions } from "../../lib/source.ts";
 import {
-  StreamResumeDuringNextError,
-  StreamCallbackDuringPauseError
+  StreamCallbackDuringBackpressureError,
+  StreamReentrancyError
 } from "../../lib/errors.ts";
-import { TStreamChunk } from "../../lib/stream.ts";
+import type { TStreamChunk } from "../../lib/stream.ts";
 
 const createDummySourceStream = ({
   streamImpl,
   callbacksImpl
 }: {
-  streamImpl: Partial<ISourceStream<TStreamChunk>>,
-  callbacksImpl: Partial<ISourceStreamFactoryOptions<TStreamChunk>>
+  streamImpl: Partial<TSourceStream>,
+  callbacksImpl: Partial<TSourceStreamFactoryOptions<TStreamChunk>>
 }) => {
   let capturedNext: ((args: { chunks: TStreamChunk[] }) => void) | undefined = undefined;
   let capturedEnd: (() => void) | undefined = undefined;
   let capturedFail: ((args: { error: Error }) => void) | undefined = undefined;
 
   const sourceFactory = source({
-    open: ({ next, end, fail }) => {
+    openSourceStream: ({ next, end, fail }) => {
       capturedNext = next;
       capturedEnd = end;
       capturedFail = fail;
 
       return {
-        pause: () => {
-          streamImpl.pause!();
-        },
-        resume: () => {
-          streamImpl.resume!();
+        backpressure: ({ pressure }) => {
+          streamImpl.backpressure!({ pressure });
         },
         destroy: () => {
           streamImpl.destroy!();
@@ -39,7 +37,7 @@ const createDummySourceStream = ({
     }
   });
 
-  const sourceStream = sourceFactory.open({
+  const sourceStream = sourceFactory.openSourceStream({
     next: ({ chunks }) => {
       callbacksImpl.next!({ chunks });
     },
@@ -67,29 +65,25 @@ const createDummySourceStream = ({
 
 const sourceReentrancyTestGroup: ITestGroup = {
   tests: {
-    "should allow [internal task] -> next() -> ... -> pause()": () => {
+    "should allow [internal task] -> next() -> ... -> backpressure()": () => {
       const sourceStream = createDummySourceStream({
         streamImpl: {
-          pause: () => { },
-          resume: () => { },
+          backpressure: () => { },
         },
 
         callbacksImpl: {
           next: () => {
-            sourceStream.streamApi.pause();
+            sourceStream.streamApi.backpressure({ pressure: 1 });
           }
         }
       });
 
-      sourceStream.streamApi.resume();
       sourceStream.internalApi.next({ chunks: ["hello", "world"] });
     },
 
     "should allow [internal task] -> next() -> ... -> destroy()": () => {
       const sourceStream = createDummySourceStream({
         streamImpl: {
-          pause: () => { },
-          resume: () => { },
           destroy: () => { }
         },
 
@@ -100,153 +94,142 @@ const sourceReentrancyTestGroup: ITestGroup = {
         }
       });
 
-      sourceStream.streamApi.resume();
       sourceStream.internalApi.next({ chunks: ["hello", "world"] });
     },
 
-    "should throw on [any task] -> next() -> ... -> resume()": () => {
-
+    "should throw on [any task] -> next() -> ... -> next()": () => {
       const sourceStream = createDummySourceStream({
-        streamImpl: {
-          pause: () => { },
-          resume: () => { }
-        },
+        streamImpl: {},
 
         callbacksImpl: {
           next: () => {
-            sourceStream.streamApi.resume();
+            sourceStream.internalApi.next({ chunks: ["again"] });
           }
         }
       });
-
-      // must be resumed once in order to emit data
-      sourceStream.streamApi.resume();
-      sourceStream.streamApi.pause();
 
       assert.throws(() => {
         sourceStream.internalApi.next({ chunks: ["hello", "world"] });
       }, (ex: Error) => {
-        return StreamResumeDuringNextError.isInstance(ex);
+        return StreamReentrancyError.isInstance(ex);
       });
     },
 
-    "should throw on [any task] -> pause() -> ... -> next()": () => {
-
+    "should throw on [any task] -> next() -> ... -> end()": () => {
       const sourceStream = createDummySourceStream({
-        streamImpl: {
-          pause: () => {
-            sourceStream.internalApi.next({ chunks: ["hello", "world"] });
-          },
-          resume: () => { }
-        },
+        streamImpl: {},
 
         callbacksImpl: {
           next: () => {
-          }
-        }
-      });
-
-      // must be resumed once
-      sourceStream.streamApi.resume();
-
-      assert.throws(() => {
-        sourceStream.streamApi.pause();
-      }, (ex: Error) => {
-        return StreamCallbackDuringPauseError.isInstance(ex);
-      });
-    },
-
-    "should throw on [any task] -> pause() -> ... -> end()": () => {
-
-      const sourceStream = createDummySourceStream({
-        streamImpl: {
-          pause: () => {
             sourceStream.internalApi.end();
-          },
-          resume: () => { }
-        },
-
-        callbacksImpl: {
-          next: () => {
           }
         }
       });
-
-      // must be resumed once
-      sourceStream.streamApi.resume();
 
       assert.throws(() => {
-        sourceStream.streamApi.pause();
+        sourceStream.internalApi.next({ chunks: ["hello", "world"] });
       }, (ex: Error) => {
-        return StreamCallbackDuringPauseError.isInstance(ex);
+        return StreamReentrancyError.isInstance(ex);
       });
     },
 
-    "should throw on [any task] -> pause() -> ... -> fail()": () => {
-
+    "should throw on [any task] -> next() -> ... -> fail()": () => {
       const sourceStream = createDummySourceStream({
-        streamImpl: {
-          pause: () => {
-            sourceStream.internalApi.fail({ error: new Error("test") });
-          },
-          resume: () => { }
-        },
+        streamImpl: {},
 
         callbacksImpl: {
           next: () => {
+            sourceStream.internalApi.fail({ error: Error("test") });
           }
         }
       });
-
-      // must be resumed once
-      sourceStream.streamApi.resume();
 
       assert.throws(() => {
-        sourceStream.streamApi.pause();
+        sourceStream.internalApi.next({ chunks: ["hello", "world"] });
       }, (ex: Error) => {
-        return StreamCallbackDuringPauseError.isInstance(ex);
+        return StreamReentrancyError.isInstance(ex);
       });
     },
 
-    "should allow [external task] --> resume() --> ... --> next() -> ... -> pause()": () => {
-
+    "should throw on [external task] -> backpressure() -> ... -> next()": () => {
       const sourceStream = createDummySourceStream({
         streamImpl: {
-          pause: () => { },
-          resume: () => {
+          backpressure: () => {
             sourceStream.internalApi.next({ chunks: ["hello", "world"] });
-          },
+          }
         },
 
         callbacksImpl: {
           next: () => {
-            sourceStream.streamApi.pause();
           }
         }
       });
 
-      sourceStream.streamApi.resume();
+      assert.throws(() => {
+        sourceStream.streamApi.backpressure({ pressure: 0 });
+      }, (ex: Error) => {
+        return StreamCallbackDuringBackpressureError.isInstance(ex);
+      });
     },
 
-    "should allow [external task] --> resume() --> ... --> next() -> ... -> destroy()": () => {
-
+    "should throw on [external task] -> backpressure() -> ... -> end()": () => {
       const sourceStream = createDummySourceStream({
         streamImpl: {
-          pause: () => { },
-          resume: () => {
-            sourceStream.internalApi.next({ chunks: ["hello", "world"] });
-          },
-          destroy: () => { }
+          backpressure: () => {
+            sourceStream.internalApi.end();
+          }
         },
 
         callbacksImpl: {
-          next: () => {
-            sourceStream.streamApi.destroy();
+          end: () => {
           }
         }
       });
 
-      sourceStream.streamApi.resume();
+      assert.throws(() => {
+        sourceStream.streamApi.backpressure({ pressure: 0 });
+      }, (ex: Error) => {
+        return StreamCallbackDuringBackpressureError.isInstance(ex);
+      });
+    },
+
+    "should throw on [external task] -> backpressure() -> ... -> fail()": () => {
+      const sourceStream = createDummySourceStream({
+        streamImpl: {
+          backpressure: () => {
+            sourceStream.internalApi.fail({ error: Error("test") });
+          }
+        },
+
+        callbacksImpl: {
+          fail: () => {
+          }
+        }
+      });
+
+      assert.throws(() => {
+        sourceStream.streamApi.backpressure({ pressure: 0 });
+      }, (ex: Error) => {
+        return StreamCallbackDuringBackpressureError.isInstance(ex);
+      });
+    },
+
+    "should throw on [external task] -> backpressure() -> ... -> backpressure()": () => {
+      const sourceStream = createDummySourceStream({
+        streamImpl: {
+          backpressure: () => {
+            sourceStream.streamApi.backpressure({ pressure: 1 });
+          }
+        },
+
+        callbacksImpl: {}
+      });
+
+      assert.throws(() => {
+        sourceStream.streamApi.backpressure({ pressure: 0 });
+      }, (ex: Error) => {
+        return StreamReentrancyError.isInstance(ex);
+      });
     }
   }
 };

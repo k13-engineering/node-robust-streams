@@ -1,5 +1,4 @@
 /* eslint-disable complexity */
-/* eslint-disable max-statements */
 
 import { source, type TSourceStream } from "./source.ts";
 import { type TStreamChunk } from "./stream.ts";

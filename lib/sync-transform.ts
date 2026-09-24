@@ -8,9 +8,13 @@ import type {
 import { duplex } from "./duplex.ts";
 
 const syncTransform = <T extends TStreamChunk, U extends TStreamChunk>({
-  start = () => ({ error: undefined, chunks: [] }),
+  start = () => {
+    return { error: undefined, chunks: [] };
+  },
   transform,
-  finish = () => ({ error: undefined, chunks: [] }),
+  finish = () => {
+    return { error: undefined, chunks: [] };
+  },
   thresholdMin = 32,
   thresholdMax = 128,
   maxPerTurn = Infinity

@@ -1,7 +1,3 @@
-interface IStreamFactory {
-
-};
-
 interface IStream {
   destroy: (args?: { reason?: string }) => void;
 };
@@ -13,7 +9,6 @@ type TStreamFailFunc = (args: { error: TStreamError }) => void;
 type TStreamDestroyFunc = (args: { reason: string }) => void;
 
 export type {
-  IStreamFactory,
   IStream,
   TStreamChunk,
   TStreamError,

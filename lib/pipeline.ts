@@ -1,4 +1,3 @@
-/* eslint-disable complexity */
 /* eslint-disable max-statements */
 
 /* eslint-disable no-use-before-define */
@@ -20,6 +19,23 @@ type TGenericWiring = {
 type TPipelineNetworkFactoryStreamArgs = {
   done: () => void;
   failed: (args: { error: TStreamError }) => void;
+};
+
+const updateContexts = <TContext extends { factory: unknown }>({ contexts, factory, update }: {
+  contexts: TContext[],
+  factory: unknown,
+  update: Partial<NoInfer<TContext>>
+}): TContext[] => {
+  return contexts.map((c) => {
+    if (c.factory !== factory) {
+      return c;
+    }
+
+    return {
+      ...c,
+      ...update
+    };
+  });
 };
 
 const pipeline = <T extends TStreamChunk, U extends TStreamChunk, V extends TStreamChunk>({ from, to }: {
@@ -131,17 +147,16 @@ const createPipelineNetwork = (): TPipelineNetwork => {
       ...providedSinkOrDuplexFactories
     ];
 
-    const dedupedProvidedFactories: typeof providedFactories = [];
-    providedFactories.forEach((f) => {
-      if (!dedupedProvidedFactories.includes(f)) {
-        dedupedProvidedFactories.push(f);
-      }
+    const dedupedProvidedFactories = providedFactories.filter((f, idx) => {
+      return providedFactories.indexOf(f) === idx;
     });
 
     return dedupedProvidedFactories;
   };
 
-  const findTargetContextsForSourceFactory = ({ factory }: { factory: TSourceStreamFactory<TStreamChunk> | TDuplexStreamFactory<TStreamChunk, TStreamChunk> }) => {
+  const findTargetContextsForSourceFactory = ({ factory }: {
+    factory: TSourceStreamFactory<TStreamChunk> | TDuplexStreamFactory<TStreamChunk, TStreamChunk>
+  }) => {
     const relevantWirings = providedWirings.filter((w) => {
       return w.from === factory;
     });
@@ -163,7 +178,9 @@ const createPipelineNetwork = (): TPipelineNetwork => {
     return targetContexts;
   };
 
-  const findSourceContextsForSinkFactory = ({ factory }: { factory: TSinkStreamFactory<TStreamChunk> | TDuplexStreamFactory<TStreamChunk, TStreamChunk> }) => {
+  const findSourceContextsForSinkFactory = ({ factory }: {
+    factory: TSinkStreamFactory<TStreamChunk> | TDuplexStreamFactory<TStreamChunk, TStreamChunk>
+  }) => {
     const relevantWirings = providedWirings.filter((w) => {
       return w.to === factory;
     });
@@ -200,30 +217,40 @@ const createPipelineNetwork = (): TPipelineNetwork => {
     return backpressure;
   };
 
-  const updateBackpressureOfSourceContext = ({ sourceContext }: {
-    sourceContext: TSourceStreamContext | TDuplexStreamContext
+  const updateBackpressureOfSourceContext = ({ factory }: {
+    factory: TSourceStreamFactory<TStreamChunk> | TDuplexStreamFactory<TStreamChunk, TStreamChunk>
   }) => {
-    const targetContexts = findTargetContextsForSourceFactory({ factory: sourceContext.factory });
+    // look up the current context, as it might have been updated by a nested backpressure call
+    const sourceContext = [...sourceContexts, ...duplexContexts].find((c) => {
+      return c.factory === factory;
+    });
+
+    if (sourceContext === undefined) {
+      return;
+    }
+
+    const targetContexts = findTargetContextsForSourceFactory({ factory });
 
     const backpressure = determineBackpressureBasedOnTargetContexts({ targetContexts });
 
     // needed to avoid infinite loops
     if (sourceContext.backpressureRequestedByNetwork !== backpressure) {
-      sourceContext.backpressureRequestedByNetwork = backpressure;
+      const update = { backpressureRequestedByNetwork: backpressure };
+      sourceContexts = updateContexts({ contexts: sourceContexts, factory, update });
+      duplexContexts = updateContexts({ contexts: duplexContexts, factory, update });
+
       sourceContext.stream.backpressure({ pressure: backpressure });
     }
   };
 
-  const updateBackpressure = ({ targetContext }: { targetContext: TSinkStreamContext | TDuplexStreamContext }) => {
-    targetContext;
+  const updateBackpressure = () => {
+    // TODO: only update the source contexts connected to the target whose backpressure changed
+    const affectedSourceFactories = [...sourceContexts, ...duplexContexts].map((c) => {
+      return c.factory;
+    });
 
-    // const affectedSourceContexts = findSourceContextsForSinkFactory({ factory: targetContext.factory });
-    const affectedSourceContexts = [
-      ...sourceContexts, ...duplexContexts
-    ];
-
-    affectedSourceContexts.forEach((sourceContext) => {
-      updateBackpressureOfSourceContext({ sourceContext });
+    affectedSourceFactories.forEach((factory) => {
+      updateBackpressureOfSourceContext({ factory });
     });
   };
 
@@ -240,6 +267,14 @@ const createPipelineNetwork = (): TPipelineNetwork => {
         return;
       }
     });
+  };
+
+  const updateTargetContexts = ({ factory, update }: {
+    factory: TSinkStreamFactory<TStreamChunk> | TDuplexStreamFactory<TStreamChunk, TStreamChunk>,
+    update: Partial<Pick<TSinkStreamContext, "finishing" | "finished">>
+  }) => {
+    sinkContexts = updateContexts({ contexts: sinkContexts, factory, update });
+    duplexContexts = updateContexts({ contexts: duplexContexts, factory, update });
   };
 
   let maybeEndEntered = false;
@@ -271,11 +306,11 @@ const createPipelineNetwork = (): TPipelineNetwork => {
 
       if (allConnectedSourcesEnded) {
 
-        targetContext.finishing = true;
+        updateTargetContexts({ factory: targetContext.factory, update: { finishing: true } });
 
         targetContext.stream.finish({
           done: () => {
-            targetContext.finished = true;
+            updateTargetContexts({ factory: targetContext.factory, update: { finished: true } });
             maybeEmitDone();
           }
         });
@@ -430,8 +465,8 @@ const createPipelineNetwork = (): TPipelineNetwork => {
         backpressureRequestedBySink: 1,
         stream: f.openDuplex({
           backpressure: ({ pressure }) => {
-            newDuplexContext.backpressureRequestedBySink = pressure;
-            updateBackpressure({ targetContext: newDuplexContext });
+            duplexContexts = updateContexts({ contexts: duplexContexts, factory: f, update: { backpressureRequestedBySink: pressure } });
+            updateBackpressure();
           },
 
           next: ({ chunks }) => {
@@ -440,13 +475,13 @@ const createPipelineNetwork = (): TPipelineNetwork => {
           },
 
           end: () => {
-            newDuplexContext.ended = true;
+            duplexContexts = updateContexts({ contexts: duplexContexts, factory: f, update: { ended: true } });
             scheduleMaybeEndStreams();
             maybeEmitDone();
           },
 
           fail: ({ error }) => {
-            newDuplexContext.failed = true;
+            duplexContexts = updateContexts({ contexts: duplexContexts, factory: f, update: { failed: true } });
             failNetwork({ error });
           },
         })
@@ -472,7 +507,7 @@ const createPipelineNetwork = (): TPipelineNetwork => {
           },
 
           end: () => {
-            newSourceContext.ended = true;
+            sourceContexts = updateContexts({ contexts: sourceContexts, factory: f, update: { ended: true } });
             scheduleMaybeEndStreams();
             maybeEmitDone();
           },
@@ -498,12 +533,12 @@ const createPipelineNetwork = (): TPipelineNetwork => {
         backpressureRequestedBySink: 1,
         stream: f.openSinkStream({
           backpressure: ({ pressure }) => {
-            newSinkContext.backpressureRequestedBySink = pressure;
-            updateBackpressure({ targetContext: newSinkContext });
+            sinkContexts = updateContexts({ contexts: sinkContexts, factory: f, update: { backpressureRequestedBySink: pressure } });
+            updateBackpressure();
           },
 
           fail: ({ error }) => {
-            newSinkContext.failed = true;
+            sinkContexts = updateContexts({ contexts: sinkContexts, factory: f, update: { failed: true } });
             failNetwork({ error });
           },
         })
@@ -539,6 +574,11 @@ const createPipelineNetwork = (): TPipelineNetwork => {
     rewire,
     stream
   };
+};
+
+export type {
+  TPipelineNetwork,
+  TPipelineNetworkStream
 };
 
 export {

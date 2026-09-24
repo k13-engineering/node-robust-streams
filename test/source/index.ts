@@ -7,12 +7,11 @@ import {
   StreamAlreadyDestroyedError,
   StreamAlreadyEndedError,
   StreamAlreadyFailedError,
-  StreamAlreadyPausedError,
-  StreamNotPausedError
+  StreamAlreadyOpenedError
 } from "../../lib/errors.ts";
 
 import { sourceReentrancyTestGroup } from "./reentrancy.ts";
-import { TStreamChunk } from "../../lib/stream.ts";
+import type { TStreamChunk } from "../../lib/stream.ts";
 
 const createDummySourceStream = () => {
   let capturedNext: ((args: { chunks: TStreamChunk[] }) => void) | undefined = undefined;
@@ -20,14 +19,13 @@ const createDummySourceStream = () => {
   let capturedFail: ((args: { error: Error }) => void) | undefined = undefined;
 
   const sourceFactory = source({
-    open: ({ next, end, fail }) => {
+    openSourceStream: ({ next, end, fail }) => {
       capturedNext = next;
       capturedEnd = end;
       capturedFail = fail;
 
       return {
-        pause: () => { },
-        resume: () => { },
+        backpressure: () => { },
         destroy: () => { }
       };
     }
@@ -41,7 +39,7 @@ const createDummySourceStream = () => {
     }
   };
 
-  const sourceStream = sourceFactory.open({
+  const sourceStream = sourceFactory.openSourceStream({
     next: ({ chunks }) => {
       state = {
         ...state,
@@ -91,29 +89,14 @@ const createDummySourceStream = () => {
     end: capturedEnd! as () => void,
     fail: capturedFail! as (args: { error: Error }) => void,
 
-    state: () => state
+    state: () => {
+      return state;
+    }
   };
 };
 
-const createDummySourceStreamInInitState = () => {
-
-  const {
-    sourceStream,
-    next,
-    end,
-    fail,
-    state
-  } = createDummySourceStream();
-
-  return {
-    sourceStream,
-
-    next,
-    end,
-    fail,
-
-    state,
-  };
+const createDummySourceStreamInOpenState = () => {
+  return createDummySourceStream();
 };
 
 const createDummySourceStreamInDestroyedState = () => {
@@ -139,28 +122,6 @@ const createDummySourceStreamInDestroyedState = () => {
   };
 };
 
-const createDummySourceStreamInStreamingState = () => {
-  const {
-    sourceStream,
-    next,
-    end,
-    fail,
-    state
-  } = createDummySourceStream();
-
-  sourceStream.resume();
-
-  return {
-    sourceStream,
-
-    next,
-    end,
-    fail,
-
-    state,
-  };
-};
-
 const createDummySourceStreamInEndedState = () => {
   const {
     sourceStream,
@@ -169,8 +130,6 @@ const createDummySourceStreamInEndedState = () => {
     fail,
     state
   } = createDummySourceStream();
-
-  sourceStream.resume();
 
   end();
 
@@ -204,8 +163,6 @@ const createDummySourceStreamInFailedState = () => {
     state
   } = createDummySourceStream();
 
-  sourceStream.resume();
-
   fail({ error: Error("test error") });
 
   return {
@@ -233,67 +190,16 @@ const createDummySourceStreamInFailedState = () => {
 // [inside] end
 // [inside] fail
 
-// [outside] pause
-// [outside] resume
+// [outside] backpressure
 // [outside] destroy
 
 const sourceTestGroup: ITestGroup = {
   groups: {
 
-    "init state": {
-      tests: {
-        "should throw when next is called": () => {
-          const { next } = createDummySourceStreamInInitState();
-
-          assert.throws(() => {
-            next({ chunks: ["abc"] });
-          }, (ex: Error) => {
-            return ex.message === "cannot write to a stream that never has been resumed";
-          });
-        },
-
-        "should throw when end is called": () => {
-          const { end } = createDummySourceStreamInInitState();
-
-          assert.throws(() => {
-            end();
-          }, (ex: Error) => {
-            return ex.message === "cannot end a stream that never has been resumed";
-          });
-        },
-
-        "should support fail": () => {
-          const { fail } = createDummySourceStreamInInitState();
-
-          fail({ error: Error("test error") });
-        },
-
-        "should throw on calls to pause": () => {
-          const { sourceStream } = createDummySourceStreamInInitState();
-
-          assert.throws(() => {
-            sourceStream.pause();
-          }, (ex: Error) => {
-            return StreamAlreadyPausedError.isInstance(ex);
-          });
-        },
-
-        "should support resume": () => {
-          const { sourceStream } = createDummySourceStreamInInitState();
-          sourceStream.resume();
-        },
-
-        "should support destroy": () => {
-          const { sourceStream } = createDummySourceStreamInInitState();
-          sourceStream.destroy();
-        },
-      }
-    },
-
-    "streaming state": {
+    "open state": {
       tests: {
         "should support next": () => {
-          const { next, state } = createDummySourceStreamInStreamingState();
+          const { next, state } = createDummySourceStreamInOpenState();
 
           const testChunks = ["abc", "def", "ghi"];
 
@@ -311,7 +217,7 @@ const sourceTestGroup: ITestGroup = {
         },
 
         "should support end": () => {
-          const { end, state } = createDummySourceStreamInStreamingState();
+          const { end, state } = createDummySourceStreamInOpenState();
 
           end();
 
@@ -327,7 +233,7 @@ const sourceTestGroup: ITestGroup = {
         },
 
         "should support fail": () => {
-          const { fail, state } = createDummySourceStreamInStreamingState();
+          const { fail, state } = createDummySourceStreamInOpenState();
 
           const testError = Error("test error");
 
@@ -344,22 +250,14 @@ const sourceTestGroup: ITestGroup = {
           });
         },
 
-        "should support pause": () => {
-          const { sourceStream } = createDummySourceStreamInStreamingState();
-          sourceStream.pause();
-        },
-
-        "should throw on calls to resume": () => {
-          const { sourceStream } = createDummySourceStreamInStreamingState();
-          assert.throws(() => {
-            sourceStream.resume();
-          }, (ex: Error) => {
-            return StreamNotPausedError.isInstance(ex);
-          });
+        "should support backpressure": () => {
+          const { sourceStream } = createDummySourceStreamInOpenState();
+          sourceStream.backpressure({ pressure: 0 });
+          sourceStream.backpressure({ pressure: 1 });
         },
 
         "should support destroy": () => {
-          const { sourceStream } = createDummySourceStreamInStreamingState();
+          const { sourceStream } = createDummySourceStreamInOpenState();
           sourceStream.destroy();
         },
       }
@@ -397,19 +295,10 @@ const sourceTestGroup: ITestGroup = {
           });
         },
 
-        "should throw on calls to pause": () => {
+        "should throw on calls to backpressure": () => {
           const { sourceStream } = createDummySourceStreamInEndedState();
           assert.throws(() => {
-            sourceStream.pause();
-          }, (ex: Error) => {
-            return StreamAlreadyEndedError.isInstance(ex);
-          });
-        },
-
-        "should throw on calls to resume": () => {
-          const { sourceStream } = createDummySourceStreamInEndedState();
-          assert.throws(() => {
-            sourceStream.resume();
+            sourceStream.backpressure({ pressure: 0 });
           }, (ex: Error) => {
             return StreamAlreadyEndedError.isInstance(ex);
           });
@@ -458,19 +347,10 @@ const sourceTestGroup: ITestGroup = {
           });
         },
 
-        "should throw on calls to pause": () => {
+        "should throw on calls to backpressure": () => {
           const { sourceStream } = createDummySourceStreamInFailedState();
           assert.throws(() => {
-            sourceStream.pause();
-          }, (ex: Error) => {
-            return StreamAlreadyFailedError.isInstance(ex);
-          });
-        },
-
-        "should throw on calls to resume": () => {
-          const { sourceStream } = createDummySourceStreamInFailedState();
-          assert.throws(() => {
-            sourceStream.resume();
+            sourceStream.backpressure({ pressure: 0 });
           }, (ex: Error) => {
             return StreamAlreadyFailedError.isInstance(ex);
           });
@@ -519,19 +399,10 @@ const sourceTestGroup: ITestGroup = {
           });
         },
 
-        "should throw on calls to pause": () => {
+        "should throw on calls to backpressure": () => {
           const { sourceStream } = createDummySourceStreamInDestroyedState();
           assert.throws(() => {
-            sourceStream.pause();
-          }, (ex: Error) => {
-            return StreamAlreadyDestroyedError.isInstance(ex);
-          });
-        },
-
-        "should throw on calls to resume": () => {
-          const { sourceStream } = createDummySourceStreamInDestroyedState();
-          assert.throws(() => {
-            sourceStream.resume();
+            sourceStream.backpressure({ pressure: 0 });
           }, (ex: Error) => {
             return StreamAlreadyDestroyedError.isInstance(ex);
           });
@@ -555,7 +426,7 @@ const sourceTestGroup: ITestGroup = {
 
   tests: {
     "should throw when empty chunks are written": () => {
-      const { next } = createDummySourceStreamInStreamingState();
+      const { next } = createDummySourceStreamInOpenState();
 
       assert.throws(() => {
         next({ chunks: [] });
@@ -565,7 +436,7 @@ const sourceTestGroup: ITestGroup = {
     },
 
     "should throw when fail is called without error": () => {
-      const { fail } = createDummySourceStreamInStreamingState();
+      const { fail } = createDummySourceStreamInOpenState();
 
       assert.throws(() => {
         // @ts-expect-error test case
@@ -575,31 +446,76 @@ const sourceTestGroup: ITestGroup = {
       });
     },
 
-    "should throw when opened more than once": () => {
+    "should throw when next is called before open returns": () => {
       const sourceFactory = source({
-        open: () => {
+        openSourceStream: ({ next }) => {
+          next({ chunks: ["abc"] });
+
           return {
-            pause: () => { },
-            resume: () => { },
+            backpressure: () => { },
             destroy: () => { }
           };
         }
       });
 
-      sourceFactory.open({
+      assert.throws(() => {
+        sourceFactory.openSourceStream({
+          next: () => { },
+          end: () => { },
+          fail: () => { }
+        });
+      }, (ex: Error) => {
+        return ex.message === "cannot call next before open returns";
+      });
+    },
+
+    "should throw when end is called before open returns": () => {
+      const sourceFactory = source({
+        openSourceStream: ({ end }) => {
+          end();
+
+          return {
+            backpressure: () => { },
+            destroy: () => { }
+          };
+        }
+      });
+
+      assert.throws(() => {
+        sourceFactory.openSourceStream({
+          next: () => { },
+          end: () => { },
+          fail: () => { }
+        });
+      }, (ex: Error) => {
+        return ex.message === "cannot call end before open returns";
+      });
+    },
+
+    "should throw when opened more than once": () => {
+      const sourceFactory = source({
+        openSourceStream: () => {
+          return {
+            backpressure: () => { },
+            destroy: () => { }
+          };
+        }
+      });
+
+      sourceFactory.openSourceStream({
         next: () => { },
         end: () => { },
         fail: () => { }
       });
 
       assert.throws(() => {
-        sourceFactory.open({
+        sourceFactory.openSourceStream({
           next: () => { },
           end: () => { },
           fail: () => { }
         });
       }, (ex: Error) => {
-        return ex.message === "cannot open a stream that is already open";
+        return StreamAlreadyOpenedError.isInstance(ex) && ex.message === "cannot open a stream that is already open";
       });
     },
   },

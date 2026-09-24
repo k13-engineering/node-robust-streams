@@ -1,45 +1,35 @@
-type TPipelineSourceOpenFunc<T extends TStreamChunk> = (args: { output: ISinkStreamFactory<T> }) => IPipelineNetworkFactory;
+import { sink, type TSinkStreamFactory } from "./sink.ts";
+import { source, type TSourceStreamFactory } from "./source.ts";
+import { duplex, type TDuplexStreamFactory } from "./duplex.ts";
+import { createPipelineNetwork, pipeline, type TPipelineNetwork } from "./pipeline.ts";
+import type { TStreamBackpressureFunc, TStreamChunk } from "./stream.ts";
 
+type TPipelineSourceOpenFunc<T extends TStreamChunk> = (args: { output: TSinkStreamFactory<T> }) => TPipelineNetwork;
 
 const pipelineSource = <T extends TStreamChunk>({
   open
 }: {
   open: TPipelineSourceOpenFunc<T>
-}): ISourceStreamFactory<T> => {
+}): TSourceStreamFactory<T> => {
 
-  return {
-    open: ({ next, end, fail }) => {
+  return source<T>({
+    openSourceStream: ({ next, end, fail }) => {
 
-      let paused = false;
-      let started = false;
-      let needsDrain = false;
-
-      let outputDrain: (() => void) | undefined = undefined;
+      let outputBackpressure: TStreamBackpressureFunc | undefined = undefined;
+      let outputFinished = false;
 
       const output = sink<T>({
-        open: ({ drain }) => {
-          outputDrain = drain;
+        openSinkStream: ({ backpressure }) => {
+          outputBackpressure = backpressure;
 
           return {
             write: ({ chunks }) => {
-              if (!started) {
-                throw Error("write before first resume, expected, please implement");
-              }
-
               next({ chunks });
-
-              const takesMore = !paused;
-              if (!takesMore) {
-                needsDrain = true;
-              }
-
-              return {
-                takesMore
-              };
             },
 
             finish: ({ done }) => {
               console.log("virtual pipeline sink finished");
+              outputFinished = true;
               done();
             },
 
@@ -54,82 +44,56 @@ const pipelineSource = <T extends TStreamChunk>({
         output
       });
 
-      let pipelineNetworkStream: IPipelineNetworkStream | undefined = undefined;
-
-      return {
-        pause: () => {
-          paused = true;
+      const pipelineNetworkStream = pipelineNetwork.stream({
+        done: () => {
+          end();
         },
 
-        resume: () => {
-          started = true;
-          paused = false;
+        failed: ({ error }) => {
+          fail({ error });
+        }
+      });
 
-          if (pipelineNetworkStream === undefined) {
-            pipelineNetworkStream = pipelineNetwork.stream({
-              done: () => {
-                // unused
-                end();
-              },
-
-              failed: ({ error }) => {
-                fail({ error });
-              }
-            });
+      return {
+        backpressure: ({ pressure }) => {
+          // a finished sink does not accept backpressure anymore
+          if (outputFinished) {
+            return;
           }
 
-          if (needsDrain) {
-            needsDrain = false;
-            outputDrain!();
-          }
+          outputBackpressure!({ pressure });
         },
 
         destroy: () => {
-          if (pipelineNetworkStream !== undefined) {
-            pipelineNetworkStream.destroy();
-          }
+          pipelineNetworkStream.destroy();
         }
       };
     }
-  };
+  });
 };
 
-type TPipelineSinkOpenFunc <T extends TStreamChunk> = (args: { input: ISourceStreamFactory<T> }) => IPipelineNetworkFactory;
+type TPipelineSinkOpenFunc<T extends TStreamChunk> = (args: { input: TSourceStreamFactory<T> }) => TPipelineNetwork;
 
 const pipelineSink = <T extends TStreamChunk>({
   open
 }: {
   open: TPipelineSinkOpenFunc<T>
-}): ISinkStreamFactory<T> => {
-  return sink({
-    open: ({ drain, fail }) => {
-
-      let started = false;
-      let paused = true;
-      let needsDrain = false;
+}): TSinkStreamFactory<T> => {
+  return sink<T>({
+    openSinkStream: ({ backpressure, fail }) => {
 
       let sourceNext: ((args: { chunks: T[] }) => void) | undefined = undefined;
       let sourceEnd: (() => void) | undefined = undefined;
 
       const input = source<T>({
-        open: ({ next, end }) => {
+        openSourceStream: ({ next, end }) => {
 
           sourceNext = next;
           sourceEnd = end;
 
           return {
-            pause: () => {
-              paused = true;
-            },
-
-            resume: () => {
-              started = true;
-              paused = false;
-
-              if (needsDrain) {
-                needsDrain = false;
-                drain();
-              }
+            backpressure: ({ pressure }) => {
+              backpressure({ pressure });
             },
 
             destroy: () => {
@@ -157,20 +121,7 @@ const pipelineSink = <T extends TStreamChunk>({
 
       return {
         write: ({ chunks }) => {
-          if (!started) {
-            throw Error("BUG: write before first resume, expected, please implement");
-          }
-
           sourceNext!({ chunks });
-
-          const takesMore = !paused;
-          if (!takesMore) {
-            needsDrain = true;
-          }
-
-          return {
-            takesMore
-          };
         },
 
         finish: ({ done }) => {
@@ -179,9 +130,7 @@ const pipelineSink = <T extends TStreamChunk>({
         },
 
         destroy: () => {
-          if (pipelineNetworkStream !== undefined) {
-            pipelineNetworkStream.destroy();
-          }
+          pipelineNetworkStream.destroy();
         }
       };
     }
@@ -189,43 +138,33 @@ const pipelineSink = <T extends TStreamChunk>({
 };
 
 type TPipelineTransformOpenFunc<T extends TStreamChunk, U extends TStreamChunk> = (args: {
-  input: ISourceStreamFactory<T>,
-  output: ISinkStreamFactory<U>
-}) => IPipelineNetworkFactory;
+  input: TSourceStreamFactory<T>,
+  output: TSinkStreamFactory<U>
+}) => TPipelineNetwork;
 
-const pipelineTransform = <T extends TStreamChunk, U extends TStreamChunk>({ open }: { open: TPipelineTransformOpenFunc<T, U> }) => {
+const pipelineTransform = <T extends TStreamChunk, U extends TStreamChunk>({
+  open
+}: {
+  open: TPipelineTransformOpenFunc<T, U>
+}): TDuplexStreamFactory<T, U> => {
   return duplex<T, U>({
-    open: ({ drain: duplexDrain, next: duplexNext, end: duplexEnd, fail: duplexFail }) => {
+    openDuplex: ({ next: duplexNext, end: duplexEnd, backpressure: duplexBackpressure, fail: duplexFail }) => {
 
-      let duplexStarted = false;
-      let duplexPaused = true;
-      let duplexNeedsDrain = false;
+      let virtualOutputBackpressure: TStreamBackpressureFunc | undefined = undefined;
+      let virtualOutputFinished = false;
 
-      let virtualOutputNeedsDrain = false;
-      let virtualOutputDrain: (() => void) | undefined = undefined;
-
-      let virtualInputPaused = true;
       let virtualInputNext: ((args: { chunks: T[] }) => void) | undefined = undefined;
       let virtualInputEnd: (() => void) | undefined = undefined;
 
       const input = source<T>({
-        open: ({ next, end }) => {
+        openSourceStream: ({ next, end }) => {
 
           virtualInputNext = next;
           virtualInputEnd = end;
 
           return {
-            pause: () => {
-              virtualInputPaused = true;
-            },
-
-            resume: () => {
-              virtualInputPaused = false;
-
-              if (duplexNeedsDrain) {
-                duplexNeedsDrain = false;
-                duplexDrain();
-              }
+            backpressure: ({ pressure }) => {
+              duplexBackpressure({ pressure });
             },
 
             destroy: () => {
@@ -236,29 +175,17 @@ const pipelineTransform = <T extends TStreamChunk, U extends TStreamChunk>({ ope
       });
 
       const output = sink<U>({
-        open: ({ drain }) => {
-          virtualOutputDrain = drain;
+        openSinkStream: ({ backpressure }) => {
+          virtualOutputBackpressure = backpressure;
 
           return {
             write: ({ chunks }) => {
-              if (!duplexStarted) {
-                throw Error("write before first resume, expected, please implement");
-              }
-
               duplexNext({ chunks });
-
-              const takesMore = !duplexPaused;
-              if (!takesMore) {
-                virtualOutputNeedsDrain = true;
-              }
-
-              return {
-                takesMore
-              };
             },
 
             finish: ({ done }) => {
               console.log("virtual pipeline sink finished");
+              virtualOutputFinished = true;
               done();
             },
 
@@ -288,21 +215,17 @@ const pipelineTransform = <T extends TStreamChunk, U extends TStreamChunk>({ ope
       });
 
       return {
+        backpressure: ({ pressure }) => {
+          // a finished sink does not accept backpressure anymore
+          if (virtualOutputFinished) {
+            return;
+          }
+
+          virtualOutputBackpressure!({ pressure });
+        },
+
         write: ({ chunks }) => {
-          if (!duplexStarted) {
-            throw Error("BUG: write before first resume, expected, please implement");
-          }
-
           virtualInputNext!({ chunks });
-
-          const takesMore = !virtualInputPaused;
-          if (!takesMore) {
-            duplexNeedsDrain = true;
-          }
-
-          return {
-            takesMore
-          };
         },
 
         finish: ({ done }) => {
@@ -310,35 +233,29 @@ const pipelineTransform = <T extends TStreamChunk, U extends TStreamChunk>({ ope
           virtualInputEnd!();
         },
 
-        pause: () => {
-          duplexPaused = true;
-        },
-
-        resume: () => {
-          duplexStarted = true;
-          duplexPaused = false;
-
-          if (virtualOutputNeedsDrain) {
-            virtualOutputNeedsDrain = false;
-            virtualOutputDrain!();
-          }
-        },
-
         destroy: () => {
-          if (pipelineNetworkStream !== undefined) {
-            pipelineNetworkStream.destroy();
-          }
+          pipelineNetworkStream.destroy();
         }
       };
     }
   });
 };
 
-const chain = <SourceChunk extends TStreamChunk>({ from }: { from: ISourceStreamFactory<SourceChunk> }) => {
+const chain = <SourceChunk extends TStreamChunk>({ from }: { from: TSourceStreamFactory<SourceChunk> }) => {
 
-  const via = <T extends TStreamChunk> ({ transform }: { transform: IDuplexStreamFactory<SourceChunk, T> }) => {
+  const via = <T extends TStreamChunk>({ transform }: { transform: TDuplexStreamFactory<SourceChunk, T> }) => {
 
-    const end = ({ to }: { to: ISinkStreamFactory<T> }) => {
+    const end = ({ to }: { to: TSinkStreamFactory<T> }): TPipelineNetwork => {
+      const network = createPipelineNetwork();
+
+      network.rewire({
+        network: [
+          pipeline({ from, to: transform }),
+          pipeline({ from: transform, to })
+        ]
+      });
+
+      return network;
     };
 
     return {
@@ -351,3 +268,15 @@ const chain = <SourceChunk extends TStreamChunk>({ from }: { from: ISourceStream
   };
 };
 
+export type {
+  TPipelineSourceOpenFunc,
+  TPipelineSinkOpenFunc,
+  TPipelineTransformOpenFunc
+};
+
+export {
+  pipelineSource,
+  pipelineSink,
+  pipelineTransform,
+  chain
+};

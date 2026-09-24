@@ -1,3 +1,4 @@
+// eslint-disable-next-line k13-engineering/no-import-alias
 import { create as createNodeTestRunner } from "ya-test-library/node-test-runner";
 import { sourceTestGroup } from "./source/index.ts";
 import { sinkTestGroup } from "./sink/index.ts";
