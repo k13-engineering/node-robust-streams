@@ -1,21 +1,19 @@
-import { type TStreamChunk } from "./stream.ts";
+import type { TSourceStream } from "./source-stream.ts";
+import type { TStreamChunk } from "./stream-chunk.ts";
 import { syncSource } from "./sync-source.ts";
 
+// source handing out the given chunks, at most maxPerTurn of them per read(), and ending afterwards
 const fixedChunksSource = <T extends TStreamChunk>({
   chunks: providedChunks,
   maxPerTurn = Infinity
 }: {
-  chunks: T[],
-  maxPerTurn?: number
-}) => {
+  chunks: readonly T[];
+  maxPerTurn?: number;
+}): TSourceStream<T> => {
   let remaining = providedChunks;
 
   return syncSource<T>({
-
-    maxPerTurn,
-
     read: () => {
-
       if (remaining.length === 0) {
         return {
           error: undefined,
@@ -32,7 +30,7 @@ const fixedChunksSource = <T extends TStreamChunk>({
         chunks,
         end: false
       };
-    },
+    }
   });
 };
 

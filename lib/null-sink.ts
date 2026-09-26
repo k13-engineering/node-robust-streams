@@ -1,22 +1,20 @@
+import type { TSinkStream } from "./sink-stream.ts";
+import type { TStreamChunk } from "./stream-chunk.ts";
 import { syncSink } from "./sync-sink.ts";
-import { type TStreamChunk } from "./stream.ts";
 
-const nullSink = <T extends TStreamChunk>() => {
+// sink accepting and dropping all chunks
+const nullSink = <T extends TStreamChunk>(): TSinkStream<T> => {
   return syncSink<T>({
     write: () => {
-      // unused
-
       return { error: undefined };
     },
 
     finish: () => {
-      // unused
-
       return { error: undefined };
     },
 
     destroy: () => {
-      // unused
+      // nothing to destroy
     }
   });
 };

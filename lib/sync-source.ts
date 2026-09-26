@@ -1,7 +1,10 @@
-/* eslint-disable complexity */
-
-import { source, type TSourceStream } from "./source.ts";
-import { type TStreamChunk } from "./stream.ts";
+import { createPollRegistry } from "./poll-registry.ts";
+import type {
+  TSourceStream,
+  TSourceStreamReadResult,
+  TSourceStreamStatus
+} from "./source-stream.ts";
+import type { TStreamChunk } from "./stream-chunk.ts";
 
 type TSyncSourceReadArgs = {
   hints: {
@@ -15,7 +18,7 @@ type TSyncSourceReadResult<T extends TStreamChunk> = {
   end: undefined;
 } | {
   error: undefined;
-  chunks: T[];
+  chunks: readonly T[];
   end: false;
 } | {
   error: undefined;
@@ -23,107 +26,79 @@ type TSyncSourceReadResult<T extends TStreamChunk> = {
   end: true;
 };
 
+const OPEN: TSourceStreamStatus = Object.freeze({ type: "open" });
+const ENDED: TSourceStreamStatus = Object.freeze({ type: "ended" });
+const FAILED: TSourceStreamStatus = Object.freeze({ type: "failed" });
+const DESTROYED: TSourceStreamStatus = Object.freeze({ type: "destroyed" });
+
+const READ_ARGS: TSyncSourceReadArgs = Object.freeze({ hints: Object.freeze({ amount: 16384 }) });
+
+const nothingToDestroy = () => {
+  // the read function holds no resources
+};
+
+// source pulling chunks from a synchronous read function
+//  - the read function acts like a kernel buffer: its data stays in it until read() is called,
+//    so every read() calls it once and hands out what it returned
+//  - as the read function is synchronous, there is always something to read while open, so polls are triggered right away,
+//    therefore the read function SHOULD NOT return empty chunks, a consumer would poll and read again right away
+//  - an error returned by the read function fails the source, as statuses do not carry error information yet,
+//    the error itself is not reported
 const syncSource = <T extends TStreamChunk>({
   read: providedRead,
-  destroy: providedDestroy = () => { },
-  maxPerTurn = Infinity
+  destroy: providedDestroy = nothingToDestroy
 }: {
   read: (args: TSyncSourceReadArgs) => TSyncSourceReadResult<T>;
   destroy?: () => void;
-  maxPerTurn?: number;
-}) => {
-  let destroyed = false;
-  let ended = false;
+}): TSourceStream<T> => {
+  const polls = createPollRegistry();
+  let status: TSourceStreamStatus = OPEN;
 
-  type C = TSourceStream;
+  const transition = ({ to }: { to: TSourceStreamStatus }) => {
+    status = to;
+    polls.notify();
+  };
 
-  return source<T>({
-    openSourceStream: ({ next, end, fail }) => {
+  const handOut = ({ chunks }: { chunks: readonly T[] }): TSourceStreamReadResult<T> => {
+    return Object.freeze({ chunks: Object.freeze([...chunks]) });
+  };
 
-      let currentBackpressure = 1;
+  const read = (): TSourceStreamReadResult<T> => {
+    const result = providedRead(READ_ARGS);
 
-      const maybeSendNext = () => {
-
-        let remaining = maxPerTurn;
-
-        while (remaining > 0 && currentBackpressure < 1 && !ended && !destroyed) {
-
-          const { error, chunks, end: sourceEnded } = providedRead({ hints: { amount: 16384 } });
-
-          if (error !== undefined) {
-            fail({ error });
-            return;
-          }
-
-          if (sourceEnded) {
-            ended = true;
-            end();
-            return;
-          }
-
-          next({ chunks });
-
-          remaining = Math.max(0, remaining - chunks.length);
-        }
-
-        // eslint-disable-next-line no-use-before-define
-        maybeScheduleNext();
-      };
-
-      let nextScheduleHandle: NodeJS.Timeout | number | undefined = undefined;
-      const maybeScheduleNext = () => {
-
-        if (destroyed) {
-          return;
-        }
-
-        if (ended) {
-          return;
-        }
-
-        if (currentBackpressure >= 1) {
-          return;
-        }
-
-        if (nextScheduleHandle !== undefined) {
-          return;
-        }
-
-        nextScheduleHandle = setTimeout(() => {
-          nextScheduleHandle = undefined;
-          maybeSendNext();
-        }, 0);
-      };
-
-      const backpressure: C["backpressure"] = ({ pressure }) => {
-        currentBackpressure = pressure;
-        maybeScheduleNext();
-      };
-
-      const destroy: C["destroy"] = () => {
-        destroyed = true;
-
-        if (nextScheduleHandle !== undefined) {
-          clearTimeout(nextScheduleHandle);
-          nextScheduleHandle = undefined;
-        }
-
-        providedDestroy();
-      };
-
-      return {
-        backpressure,
-        destroy
-      };
+    if (result.error !== undefined) {
+      transition({ to: FAILED });
+      return handOut({ chunks: [] });
     }
-  });
-};
 
-export {
-  syncSource
+    if (result.end) {
+      transition({ to: ENDED });
+      return handOut({ chunks: [] });
+    }
+
+    return handOut({ chunks: result.chunks });
+  };
+
+  return {
+    status: () => {
+      return status;
+    },
+    read,
+    poll: ({ onUpdate }) => {
+      return polls.poll({ onUpdate, ready: status === OPEN });
+    },
+    destroy: () => {
+      providedDestroy();
+      transition({ to: DESTROYED });
+    }
+  };
 };
 
 export type {
   TSyncSourceReadArgs,
   TSyncSourceReadResult
+};
+
+export {
+  syncSource
 };

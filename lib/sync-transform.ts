@@ -1,204 +1,166 @@
-/* eslint-disable complexity */
-/* eslint-disable max-statements */
-
+import { createPollRegistry } from "./poll-registry.ts";
 import type {
-  TStreamChunk,
-  TStreamError,
-} from "./stream.ts";
-import { duplex } from "./duplex.ts";
+  TSinkStreamWriteTransaction,
+  TSinkStreamWriteTransactionStatus
+} from "./sink-stream.ts";
+import type { TSourceStreamReadResult } from "./source-stream.ts";
+import type { TStreamChunk } from "./stream-chunk.ts";
+import type { TTransformStream, TTransformStreamStatus } from "./transform-stream.ts";
 
+type TSyncTransformResult<U extends TStreamChunk> = {
+  error?: Error;
+  chunks?: readonly U[];
+};
+
+const OPEN: TTransformStreamStatus = Object.freeze({ type: "open" });
+const FLUSHING: TTransformStreamStatus = Object.freeze({ type: "flushing" });
+const DONE: TTransformStreamStatus = Object.freeze({ type: "done" });
+const FAILED: TTransformStreamStatus = Object.freeze({ type: "failed" });
+const DESTROYED: TTransformStreamStatus = Object.freeze({ type: "destroyed" });
+
+const PENDING: TSinkStreamWriteTransactionStatus = Object.freeze({ type: "pending" });
+const COMMITTED: TSinkStreamWriteTransactionStatus = Object.freeze({ type: "committed" });
+const DISCARDED: TSinkStreamWriteTransactionStatus = Object.freeze({ type: "discarded" });
+
+const ACTIVE = ["open", "flushing"];
+const DISCARDING = ["failed", "destroyed"];
+
+const noChunks = <U extends TStreamChunk>(): TSyncTransformResult<U> => {
+  return { chunks: [] };
+};
+
+// transform processing chunks synchronously within write()
+//  - start is called before the first chunks are transformed, finish is called by end(), both may produce chunks
+//  - a transaction is committed once all data resulting from its chunks has been read
+//  - start, transform and finish MUST return error or chunks, an error fails the transform, as statuses
+//    do not carry error information yet, the error itself is not reported
+//  - an exception thrown by start, transform or finish is a bug and is not caught
 const syncTransform = <T extends TStreamChunk, U extends TStreamChunk>({
-  start = () => {
-    return { error: undefined, chunks: [] };
-  },
+  start = noChunks,
   transform,
-  finish = () => {
-    return { error: undefined, chunks: [] };
-  },
-  thresholdMin = 32,
-  thresholdMax = 128,
-  maxPerTurn = Infinity
+  finish = noChunks
 }: {
-  start?: () => { error?: TStreamError, chunks?: U[] }
-  transform: ({ chunks }: { chunks: T[] }) => { error?: TStreamError, chunks?: U[] },
-  finish?: () => { error?: TStreamError, chunks?: U[] },
-  thresholdMin?: number,
-  thresholdMax?: number,
-  maxPerTurn?: number
-}) => {
-  return duplex<T, U>({
-    openDuplex: ({ next, end, backpressure, fail }) => {
+  start?: () => TSyncTransformResult<U>;
+  transform: (args: { chunks: readonly T[] }) => TSyncTransformResult<U>;
+  finish?: () => TSyncTransformResult<U>;
+}): TTransformStream<T, U> => {
+  const polls = createPollRegistry();
+  let status: TTransformStreamStatus = OPEN;
+  let started = false;
+  let buffered: readonly U[] = [];
+  let written = 0;
+  let committed = 0;
 
-      let finished = false;
-      let destroyed = false;
-      let failed = false;
-      let outputBackpressure = 1;
-      let ended = false;
-      let started = false;
-
-      let doneCallback: (() => void) | undefined = undefined;
-
-      let bufferedChunks: T[] = [];
-      let timeoutHandleNextTurn: NodeJS.Timeout | number | undefined = undefined;
-
-      const processResult = ({ result }: { result: { error?: TStreamError, chunks?: U[] } }) => {
-        if (result.error === undefined && result.chunks === undefined) {
-          throw Error("sync transform must return error or chunks");
-        }
-
-        if (result.error !== undefined) {
-          failed = true;
-          fail({ error: result.error });
-          return;
-        }
-
-        const chunksToForward = result.chunks!;
-
-        if (chunksToForward.length > 0) {
-          next({ chunks: chunksToForward });
-        }
-      };
-
-      let lastPropagatedBackpressure: number | undefined = undefined;
-
-      const maybePropagateBackpressure = () => {
-
-        let newBackpressure = 0;
-
-        if (outputBackpressure > 0) {
-          newBackpressure = 1.0;
-        } else if (bufferedChunks.length >= thresholdMin) {
-          newBackpressure = (bufferedChunks.length - thresholdMin) / (thresholdMax - thresholdMin);
-        }
-
-        if (newBackpressure > 1) {
-          newBackpressure = 1;
-        }
-
-        if (newBackpressure !== lastPropagatedBackpressure) {
-          lastPropagatedBackpressure = newBackpressure;
-          backpressure({ pressure: newBackpressure });
-        }
-      };
-
-      const maybeSendNext = () => {
-        if (failed) {
-          throw Error("BUG: maybeSendNext called altough already failed");
-        }
-
-        if (ended) {
-          throw Error("BUG: maybeSendNext called altough already ended");
-        }
-
-        if (destroyed) {
-          throw Error("BUG: maybeSendNext called altough already destroyed");
-        }
-
-        if (!started) {
-          started = true;
-
-          const result = start();
-          processResult({ result });
-
-          if (destroyed) {
-            return;
-          }
-        }
-
-        const chunks = bufferedChunks.slice(0, maxPerTurn);
-        bufferedChunks = bufferedChunks.slice(maxPerTurn);
-
-        if (chunks.length > 0) {
-          const result = transform({ chunks });
-          processResult({ result });
-
-          if (destroyed) {
-            return;
-          }
-        }
-
-        if (bufferedChunks.length > 0 && timeoutHandleNextTurn === undefined) {
-          timeoutHandleNextTurn = setTimeout(() => {
-            timeoutHandleNextTurn = undefined;
-
-            // if our lifecycle ended in the meantime, do nothing
-            if (destroyed || failed || ended) {
-              return;
-            }
-
-            maybeSendNext();
-          }, 0);
-        }
-
-        if (destroyed || failed) {
-          return;
-        }
-
-        maybePropagateBackpressure();
-
-        if (bufferedChunks.length === 0 && finished) {
-          const result = finish();
-          processResult({ result });
-
-          if (destroyed) {
-            return;
-          }
-
-          ended = true;
-          end();
-
-          if (destroyed) {
-            return;
-          }
-
-          doneCallback!();
-        }
-      };
-
-      return {
-
-        backpressure: ({ pressure }) => {
-          if (pressure < 0 || pressure > 1) {
-            throw Error(`backpressure: pressure must be between 0 and 1`);
-          }
-
-          outputBackpressure = pressure;
-          maybePropagateBackpressure();
-        },
-
-        write: ({ chunks }) => {
-
-          if (failed || destroyed) {
-            throw Error("cannot write to a failed or destroyed stream");
-          }
-
-          bufferedChunks = [...bufferedChunks, ...chunks];
-          maybeSendNext();
-        },
-
-        finish: ({ done }) => {
-          if (failed || destroyed) {
-            throw Error("cannot finish a failed or destroyed stream");
-          }
-
-          // console.log(`sync transform ${name} finished`);
-          finished = true;
-          doneCallback = done;
-
-          maybeSendNext();
-        },
-
-        destroy: () => {
-          if (failed || destroyed) {
-            throw Error("cannot destroy a failed or destroyed stream");
-          }
-
-          destroyed = true;
-          clearTimeout(timeoutHandleNextTurn);
-        }
-      };
+  const transactionStatus = ({ index }: { index: number }) => {
+    if (index < committed) {
+      return COMMITTED;
     }
-  });
+
+    return DISCARDING.includes(status.type) ? DISCARDED : PENDING;
+  };
+
+  const process = ({ result }: { result: TSyncTransformResult<U> }) => {
+    if (result.error === undefined && result.chunks === undefined) {
+      throw Error("sync transform: start, transform and finish MUST return error or chunks");
+    }
+
+    if (result.error !== undefined) {
+      status = FAILED;
+      buffered = [];
+      return;
+    }
+
+    buffered = [...buffered, ...result.chunks!];
+  };
+
+  const ensureStarted = () => {
+    if (!started) {
+      started = true;
+      process({ result: start() });
+    }
+  };
+
+  // once nothing is buffered anymore, all data resulting from the transactions written so far has been read
+  const settleDrained = () => {
+    if (buffered.length === 0) {
+      committed = written;
+    }
+
+    if (status === FLUSHING && buffered.length === 0) {
+      status = DONE;
+    }
+  };
+
+  const settle = () => {
+    if (ACTIVE.includes(status.type)) {
+      settleDrained();
+    }
+
+    polls.notify();
+  };
+
+  const write = ({ chunks }: { chunks: readonly T[] }): TSinkStreamWriteTransaction => {
+    const index = written;
+    written += 1;
+
+    ensureStarted();
+
+    if (status === OPEN) {
+      process({ result: transform({ chunks }) });
+    }
+
+    settle();
+
+    return {
+      status: () => {
+        return transactionStatus({ index });
+      }
+    };
+  };
+
+  const read = (): TSourceStreamReadResult<U> => {
+    const result = Object.freeze({ chunks: Object.freeze(buffered) });
+
+    buffered = [];
+    settle();
+
+    return result;
+  };
+
+  const end = () => {
+    ensureStarted();
+
+    if (status === OPEN) {
+      process({ result: finish() });
+    }
+
+    if (status === OPEN) {
+      status = FLUSHING;
+    }
+
+    settle();
+  };
+
+  return {
+    status: () => {
+      return status;
+    },
+    read,
+    write,
+    end,
+    poll: ({ onUpdate }) => {
+      return polls.poll({ onUpdate, ready: buffered.length > 0 });
+    },
+    destroy: () => {
+      buffered = [];
+      status = DESTROYED;
+      polls.notify();
+    }
+  };
+};
+
+export type {
+  TSyncTransformResult
 };
 
 export {
