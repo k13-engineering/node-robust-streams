@@ -19,11 +19,13 @@ type TSyncSinkFinishResult = {
   error: undefined;
 };
 
-const OPEN: TSinkStreamStatus = Object.freeze({ type: "open" });
-const FINISHING: TSinkStreamStatus = Object.freeze({ type: "finishing" });
-const FINISHED: TSinkStreamStatus = Object.freeze({ type: "finished" });
-const FAILED: TSinkStreamStatus = Object.freeze({ type: "failed" });
-const DESTROYED: TSinkStreamStatus = Object.freeze({ type: "destroyed" });
+// the statuses a sync sink may yield, as finish is synchronous, it never is observably finishing
+type TSyncSinkStatus = Extract<TSinkStreamStatus, { type: "open" | "finished" | "failed" | "destroyed" }>;
+
+const OPEN: TSyncSinkStatus = Object.freeze({ type: "open" });
+const FINISHED: TSyncSinkStatus = Object.freeze({ type: "finished" });
+const FAILED: TSyncSinkStatus = Object.freeze({ type: "failed" });
+const DESTROYED: TSyncSinkStatus = Object.freeze({ type: "destroyed" });
 
 const COMMITTED: TSinkStreamWriteTransactionStatus = Object.freeze({ type: "committed" });
 const DISCARDED: TSinkStreamWriteTransactionStatus = Object.freeze({ type: "discarded" });
@@ -42,13 +44,13 @@ const syncSink = <T extends TStreamChunk>({
   write: (args: { chunks: readonly T[] }) => TSyncSinkWriteResult;
   finish: () => TSyncSinkFinishResult;
   destroy: () => void;
-}): TSinkStream<T> => {
+}): TSinkStream<T, TSyncSinkStatus> => {
   const polls = createPollRegistry();
-  let status: TSinkStreamStatus = OPEN;
+  let status: TSyncSinkStatus = OPEN;
   let written = 0;
   let committed = 0;
 
-  const transition = ({ to }: { to: TSinkStreamStatus }) => {
+  const transition = ({ to }: { to: TSyncSinkStatus }) => {
     status = to;
     polls.notify();
   };
@@ -79,8 +81,6 @@ const syncSink = <T extends TStreamChunk>({
   };
 
   const end = () => {
-    transition({ to: FINISHING });
-
     const { error } = providedFinish();
     transition({ to: error === undefined ? FINISHED : FAILED });
   };
@@ -103,7 +103,8 @@ const syncSink = <T extends TStreamChunk>({
 
 export type {
   TSyncSinkWriteResult,
-  TSyncSinkFinishResult
+  TSyncSinkFinishResult,
+  TSyncSinkStatus
 };
 
 export {

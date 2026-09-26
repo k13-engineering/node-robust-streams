@@ -2,7 +2,10 @@ import { violation } from "./guard.ts";
 import type { TSourceStream, TSourceStreamStatus } from "./source-stream.ts";
 import type { TStreamChunk } from "./stream-chunk.ts";
 
-const FAILED: TSourceStreamStatus = Object.freeze({ type: "failed" });
+// the only status an error source yields
+type TErrorSourceStatus = Extract<TSourceStreamStatus, { type: "failed" }>;
+
+const FAILED: TErrorSourceStatus = Object.freeze({ type: "failed" });
 
 const calledInFailed = ({ method }: { method: string }) => {
   return () => {
@@ -12,7 +15,7 @@ const calledInFailed = ({ method }: { method: string }) => {
 
 // source that is failed right away, e.g. to test error handling
 // as statuses do not carry error information yet, it takes no error
-const errorSource = <T extends TStreamChunk>(): TSourceStream<T> => {
+const errorSource = <T extends TStreamChunk>(): TSourceStream<T, TErrorSourceStatus> => {
   return {
     status: () => {
       return FAILED;
@@ -21,6 +24,10 @@ const errorSource = <T extends TStreamChunk>(): TSourceStream<T> => {
     poll: calledInFailed({ method: "poll" }),
     destroy: calledInFailed({ method: "destroy" })
   };
+};
+
+export type {
+  TErrorSourceStatus
 };
 
 export {

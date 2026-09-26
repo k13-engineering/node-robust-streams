@@ -60,13 +60,17 @@ type TSourceStreamReadResult<T extends TStreamChunk> = {
   chunks: readonly T[];
 };
 
-type TSourceStream<T extends TStreamChunk> = {
+// S are the statuses the stream may yield, an implementation MAY declare a subset of them
+// and MAY add own properties to them besides type (e.g. { type: "open", remainingChunks: 3 }):
+//  - own properties MUST be plain data, as statuses are compared by value and are immutable
+//  - own properties are part of the status, so the rules for status() and poll() apply to them as well
+type TSourceStream<T extends TStreamChunk, S extends TSourceStreamStatus = TSourceStreamStatus> = {
   // MUST yield the same result until either:
   //  - a method of this interface is called
   //  - the implementation changes it by itself (e.g. an own update() method or an IO callback)
   // i.e. if you repeatedly call status() and nothing else, the result MUST NOT change
   // the returned object MUST NOT be modified afterwards, it MAY be a new object on every call
-  status: () => TSourceStreamStatus;
+  status: () => S;
 
   // MUST NOT be called in:
   //  - status opening
@@ -117,8 +121,12 @@ const SOURCE_TRANSITIONS: readonly TTransition[] = [
 ];
 
 // enforces the contract of the source stream, a violation throws and is meant to crash the process
-const sourceGuard = <T extends TStreamChunk>({ source }: { source: TSourceStream<T> }): TSourceStream<T> => {
-  const ctx = createGuardContext<TSourceStreamStatus>({
+const sourceGuard = <T extends TStreamChunk, S extends TSourceStreamStatus>({
+  source
+}: {
+  source: TSourceStream<T, S>
+}): TSourceStream<T, S> => {
+  const ctx = createGuardContext<S>({
     spec: { name: "source", transitions: SOURCE_TRANSITIONS },
     status: source.status,
     onObserve: ignore

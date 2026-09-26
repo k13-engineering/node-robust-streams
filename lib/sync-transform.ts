@@ -12,11 +12,14 @@ type TSyncTransformResult<U extends TStreamChunk> = {
   chunks?: readonly U[];
 };
 
-const OPEN: TTransformStreamStatus = Object.freeze({ type: "open" });
-const FLUSHING: TTransformStreamStatus = Object.freeze({ type: "flushing" });
-const DONE: TTransformStreamStatus = Object.freeze({ type: "done" });
-const FAILED: TTransformStreamStatus = Object.freeze({ type: "failed" });
-const DESTROYED: TTransformStreamStatus = Object.freeze({ type: "destroyed" });
+// the statuses a sync transform may yield
+type TSyncTransformStatus = Extract<TTransformStreamStatus, { type: "open" | "flushing" | "done" | "failed" | "destroyed" }>;
+
+const OPEN: TSyncTransformStatus = Object.freeze({ type: "open" });
+const FLUSHING: TSyncTransformStatus = Object.freeze({ type: "flushing" });
+const DONE: TSyncTransformStatus = Object.freeze({ type: "done" });
+const FAILED: TSyncTransformStatus = Object.freeze({ type: "failed" });
+const DESTROYED: TSyncTransformStatus = Object.freeze({ type: "destroyed" });
 
 const PENDING: TSinkStreamWriteTransactionStatus = Object.freeze({ type: "pending" });
 const COMMITTED: TSinkStreamWriteTransactionStatus = Object.freeze({ type: "committed" });
@@ -43,9 +46,9 @@ const syncTransform = <T extends TStreamChunk, U extends TStreamChunk>({
   start?: () => TSyncTransformResult<U>;
   transform: (args: { chunks: readonly T[] }) => TSyncTransformResult<U>;
   finish?: () => TSyncTransformResult<U>;
-}): TTransformStream<T, U> => {
+}): TTransformStream<T, U, TSyncTransformStatus> => {
   const polls = createPollRegistry();
-  let status: TTransformStreamStatus = OPEN;
+  let status: TSyncTransformStatus = OPEN;
   let started = false;
   let buffered: readonly U[] = [];
   let written = 0;
@@ -160,7 +163,8 @@ const syncTransform = <T extends TStreamChunk, U extends TStreamChunk>({
 };
 
 export type {
-  TSyncTransformResult
+  TSyncTransformResult,
+  TSyncTransformStatus
 };
 
 export {

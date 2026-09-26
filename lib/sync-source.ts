@@ -26,10 +26,13 @@ type TSyncSourceReadResult<T extends TStreamChunk> = {
   end: true;
 };
 
-const OPEN: TSourceStreamStatus = Object.freeze({ type: "open" });
-const ENDED: TSourceStreamStatus = Object.freeze({ type: "ended" });
-const FAILED: TSourceStreamStatus = Object.freeze({ type: "failed" });
-const DESTROYED: TSourceStreamStatus = Object.freeze({ type: "destroyed" });
+// the statuses a sync source may yield
+type TSyncSourceStatus = Extract<TSourceStreamStatus, { type: "open" | "ended" | "failed" | "destroyed" }>;
+
+const OPEN: TSyncSourceStatus = Object.freeze({ type: "open" });
+const ENDED: TSyncSourceStatus = Object.freeze({ type: "ended" });
+const FAILED: TSyncSourceStatus = Object.freeze({ type: "failed" });
+const DESTROYED: TSyncSourceStatus = Object.freeze({ type: "destroyed" });
 
 const READ_ARGS: TSyncSourceReadArgs = Object.freeze({ hints: Object.freeze({ amount: 16384 }) });
 
@@ -50,11 +53,11 @@ const syncSource = <T extends TStreamChunk>({
 }: {
   read: (args: TSyncSourceReadArgs) => TSyncSourceReadResult<T>;
   destroy?: () => void;
-}): TSourceStream<T> => {
+}): TSourceStream<T, TSyncSourceStatus> => {
   const polls = createPollRegistry();
-  let status: TSourceStreamStatus = OPEN;
+  let status: TSyncSourceStatus = OPEN;
 
-  const transition = ({ to }: { to: TSourceStreamStatus }) => {
+  const transition = ({ to }: { to: TSyncSourceStatus }) => {
     status = to;
     polls.notify();
   };
@@ -96,7 +99,8 @@ const syncSource = <T extends TStreamChunk>({
 
 export type {
   TSyncSourceReadArgs,
-  TSyncSourceReadResult
+  TSyncSourceReadResult,
+  TSyncSourceStatus
 };
 
 export {

@@ -85,13 +85,17 @@ type TSinkStreamWriteTransaction = {
   status: () => TSinkStreamWriteTransactionStatus;
 };
 
-type TSinkStream<T extends TStreamChunk> = {
+// S are the statuses the stream may yield, an implementation MAY declare a subset of them
+// and MAY add own properties to them besides type (e.g. { type: "open", remainingChunks: 3 }):
+//  - own properties MUST be plain data, as statuses are compared by value and are immutable
+//  - own properties are part of the status, so the rules for status() and poll() apply to them as well
+type TSinkStream<T extends TStreamChunk, S extends TSinkStreamStatus = TSinkStreamStatus> = {
   // MUST yield the same result until either:
   //  - a method of this interface is called
   //  - the implementation changes it by itself (e.g. an own update() method or an IO callback)
   // i.e. if you repeatedly call status() and nothing else, the result MUST NOT change
   // the returned object MUST NOT be modified afterwards, it MAY be a new object on every call
-  status: () => TSinkStreamStatus;
+  status: () => S;
 
   // MUST NOT be called in:
   //  - status opening
@@ -154,7 +158,7 @@ const SINK_TRANSITIONS: readonly TTransition[] = [
 const SINK_INACTIVE = ["opening", "finishing", "finished", "failing", "failed", "destroying", "destroyed"];
 
 // enforces the contract of the sink stream, a violation throws and is meant to crash the process
-const sinkGuard = <T extends TStreamChunk>({ sink }: { sink: TSinkStream<T> }): TSinkStream<T> => {
+const sinkGuard = <T extends TStreamChunk, S extends TSinkStreamStatus>({ sink }: { sink: TSinkStream<T, S> }): TSinkStream<T, S> => {
   const transactions = createTransactionTracker({
     name: "sink",
     completeStatus: "finished",
@@ -162,7 +166,7 @@ const sinkGuard = <T extends TStreamChunk>({ sink }: { sink: TSinkStream<T> }): 
     streamStatus: sink.status
   });
 
-  const ctx = createGuardContext<TSinkStreamStatus>({
+  const ctx = createGuardContext<S>({
     spec: { name: "sink", transitions: SINK_TRANSITIONS },
     status: sink.status,
     onObserve: transactions.checkStream

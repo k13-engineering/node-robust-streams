@@ -9,9 +9,11 @@ export type {
   TSinkStreamWriteTransactionStatus
 } from "./sink-stream.ts";
 export type { TTransformStream, TTransformStreamStatus } from "./transform-stream.ts";
-export type { TSyncSourceReadArgs, TSyncSourceReadResult } from "./sync-source.ts";
-export type { TSyncSinkWriteResult, TSyncSinkFinishResult } from "./sync-sink.ts";
-export type { TSyncTransformResult } from "./sync-transform.ts";
+export type { TSyncSourceReadArgs, TSyncSourceReadResult, TSyncSourceStatus } from "./sync-source.ts";
+export type { TSyncSinkWriteResult, TSyncSinkFinishResult, TSyncSinkStatus } from "./sync-sink.ts";
+export type { TSyncTransformResult, TSyncTransformStatus } from "./sync-transform.ts";
+export type { TErrorSourceStatus } from "./error-source.ts";
+export type { TFixedChunksSourceStatus } from "./fixed-chunks-source.ts";
 export type {
   TPump,
   TPumpResult,

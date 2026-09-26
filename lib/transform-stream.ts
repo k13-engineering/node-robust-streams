@@ -67,13 +67,21 @@ type TTransformStreamStatus = {
 //  - a transaction MUST end as committed or discarded and MUST NOT be pending in a final status (done, failed, destroyed)
 //  - a transaction MUST NOT be discarded unless the stream is failed or destroyed
 
-type TTransformStream<T extends TStreamChunk, U extends TStreamChunk> = {
+// S are the statuses the stream may yield, an implementation MAY declare a subset of them
+// and MAY add own properties to them besides type (e.g. { type: "open", remainingChunks: 3 }):
+//  - own properties MUST be plain data, as statuses are compared by value and are immutable
+//  - own properties are part of the status, so the rules for status() and poll() apply to them as well
+type TTransformStream<
+  T extends TStreamChunk,
+  U extends TStreamChunk,
+  S extends TTransformStreamStatus = TTransformStreamStatus
+> = {
   // MUST yield the same result until either:
   //  - a method of this interface is called
   //  - the implementation changes it by itself (e.g. an own update() method or an IO callback)
   // i.e. if you repeatedly call status() and nothing else, the result MUST NOT change
   // the returned object MUST NOT be modified afterwards, it MAY be a new object on every call
-  status: () => TTransformStreamStatus;
+  status: () => S;
 
   // MUST NOT be called in:
   //  - status opening
@@ -147,11 +155,11 @@ const TRANSFORM_TRANSITIONS: readonly TTransition[] = [
 const TRANSFORM_WRITE_INACTIVE = ["opening", "flushing", "done", "failing", "failed", "destroying", "destroyed"];
 
 // enforces the contract of the transform stream, a violation throws and is meant to crash the process
-const transformGuard = <T extends TStreamChunk, U extends TStreamChunk>({
+const transformGuard = <T extends TStreamChunk, U extends TStreamChunk, S extends TTransformStreamStatus>({
   transform
 }: {
-  transform: TTransformStream<T, U>
-}): TTransformStream<T, U> => {
+  transform: TTransformStream<T, U, S>
+}): TTransformStream<T, U, S> => {
   const transactions = createTransactionTracker({
     name: "transform",
     completeStatus: "done",
@@ -159,7 +167,7 @@ const transformGuard = <T extends TStreamChunk, U extends TStreamChunk>({
     streamStatus: transform.status
   });
 
-  const ctx = createGuardContext<TTransformStreamStatus>({
+  const ctx = createGuardContext<S>({
     spec: { name: "transform", transitions: TRANSFORM_TRANSITIONS },
     status: transform.status,
     onObserve: transactions.checkStream

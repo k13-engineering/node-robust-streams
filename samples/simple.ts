@@ -50,13 +50,16 @@ const pump = createPump({
 const next = () => {
 
   const sourceStatus = source.status();
-  if (sourceStatus.type === "failed" || sourceStatus.type === "failing") {
+  console.log({ sourceStatus });
+
+
+  if (sourceStatus.type === "failed") {
     console.error("Source has failed or is failing:", sourceStatus);
     return;
   }
 
   const sinkStatus = sink.status();
-  if (sinkStatus.type === "failed" || sinkStatus.type === "failing") {
+  if (sinkStatus.type === "failed") {
     console.error("Sink has failed or is failing:", sinkStatus);
     return;
   }
