@@ -9,10 +9,13 @@ import {
 import type { TTransition } from "./guard.ts";
 import type { TStreamChunk } from "./stream-chunk.ts";
 import type { TPollHandle } from "./poll.ts";
-import type { TSinkStreamWriteTransaction } from "./sink-stream.ts";
+import type {
+  TSinkStreamWriteTransaction,
+  TSinkStreamWriteTransactionStatus
+} from "./sink-stream.ts";
 import type { TSourceStreamReadResult } from "./source-stream.ts";
 
-type TTransformStreamStatus = {
+type TDuplexStreamStatus = {
   type: "opening"
 } | {
   type: "open"
@@ -58,7 +61,7 @@ type TTransformStreamStatus = {
 //    (e.g. read(), poll() or an own start() method) MUST NOT be required to start or continue processing
 
 // transaction rules:
-//  - a transaction is committed once all data resulting from its chunks has been read() out of the transform,
+//  - a transaction is committed once all data resulting from its chunks has been read() out of the duplex,
 //    if its chunks result in no data, it is committed once they have been processed
 //  - written chunks MUST be processed in the order they were written
 //  - transactions MUST be committed in the order they were written: a transaction MUST stay pending
@@ -71,10 +74,13 @@ type TTransformStreamStatus = {
 // and MAY add own properties to them besides type (e.g. { type: "open", remainingChunks: 3 }):
 //  - own properties MUST be plain data, as statuses are compared by value and are immutable
 //  - own properties are part of the status, so the rules for status() and poll() apply to them as well
-type TTransformStream<
+// X are the statuses the transactions of the stream may yield, like with S, an implementation MAY declare a subset
+// of them and MAY add own properties to them besides type (e.g. { type: "committed", offset: 1024 })
+type TDuplexStream<
   T extends TStreamChunk,
   U extends TStreamChunk,
-  S extends TTransformStreamStatus = TTransformStreamStatus
+  S extends TDuplexStreamStatus = TDuplexStreamStatus,
+  X extends TSinkStreamWriteTransactionStatus = TSinkStreamWriteTransactionStatus
 > = {
   // MUST yield the same result until either:
   //  - a method of this interface is called
@@ -102,7 +108,7 @@ type TTransformStream<
   //  - status destroying
   //  - status destroyed
   // chunks MUST NOT be empty
-  write: (args: { chunks: readonly T[] }) => TSinkStreamWriteTransaction;
+  write: (args: { chunks: readonly T[] }) => TSinkStreamWriteTransaction<X>;
 
   // MUST NOT be called in:
   //  - status opening
@@ -137,7 +143,7 @@ type TTransformStream<
   destroy: () => void;
 };
 
-const TRANSFORM_TRANSITIONS: readonly TTransition[] = [
+const DUPLEX_TRANSITIONS: readonly TTransition[] = [
   ["opening", "open"],
   ["opening", "failing"],
   ["opening", "destroying"],
@@ -152,24 +158,25 @@ const TRANSFORM_TRANSITIONS: readonly TTransition[] = [
   ["destroying", "destroyed"]
 ];
 
-const TRANSFORM_WRITE_INACTIVE = ["opening", "flushing", "done", "failing", "failed", "destroying", "destroyed"];
+const DUPLEX_WRITE_INACTIVE = ["opening", "flushing", "done", "failing", "failed", "destroying", "destroyed"];
 
-// enforces the contract of the transform stream, a violation throws and is meant to crash the process
-const transformGuard = <T extends TStreamChunk, U extends TStreamChunk, S extends TTransformStreamStatus>({
-  transform
-}: {
-  transform: TTransformStream<T, U, S>
-}): TTransformStream<T, U, S> => {
-  const transactions = createTransactionTracker({
-    name: "transform",
+// enforces the contract of the duplex stream, a violation throws and is meant to crash the process
+const duplexGuard = <
+  T extends TStreamChunk,
+  U extends TStreamChunk,
+  S extends TDuplexStreamStatus,
+  X extends TSinkStreamWriteTransactionStatus
+>({ duplex }: { duplex: TDuplexStream<T, U, S, X> }): TDuplexStream<T, U, S, X> => {
+  const transactions = createTransactionTracker<X>({
+    name: "duplex",
     completeStatus: "done",
     finalStatuses: ["done", "failed", "destroyed"],
-    streamStatus: transform.status
+    streamStatus: duplex.status
   });
 
   const ctx = createGuardContext<S>({
-    spec: { name: "transform", transitions: TRANSFORM_TRANSITIONS },
-    status: transform.status,
+    spec: { name: "duplex", transitions: DUPLEX_TRANSITIONS },
+    status: duplex.status,
     onObserve: transactions.checkStream
   });
 
@@ -178,20 +185,20 @@ const transformGuard = <T extends TStreamChunk, U extends TStreamChunk, S extend
     read: guardRead({
       ctx,
       forbidden: ["opening", "done", "failing", "failed", "destroying", "destroyed"],
-      read: transform.read
+      read: duplex.read
     }),
-    write: guardWrite({ name: "transform", ctx, forbidden: TRANSFORM_WRITE_INACTIVE, write: transform.write, transactions }),
-    end: guardMethod({ ctx, method: "end", forbidden: TRANSFORM_WRITE_INACTIVE, fn: transform.end }),
-    poll: guardPoll({ name: "transform", ctx, forbidden: ["done", "failed", "destroyed"], poll: transform.poll }),
-    destroy: guardMethod({ ctx, method: "destroy", forbidden: ["done", "failed", "destroying", "destroyed"], fn: transform.destroy })
+    write: guardWrite({ name: "duplex", ctx, forbidden: DUPLEX_WRITE_INACTIVE, write: duplex.write, transactions }),
+    end: guardMethod({ ctx, method: "end", forbidden: DUPLEX_WRITE_INACTIVE, fn: duplex.end }),
+    poll: guardPoll({ name: "duplex", ctx, forbidden: ["done", "failed", "destroyed"], poll: duplex.poll }),
+    destroy: guardMethod({ ctx, method: "destroy", forbidden: ["done", "failed", "destroying", "destroyed"], fn: duplex.destroy })
   };
 };
 
 export type {
-  TTransformStream,
-  TTransformStreamStatus
+  TDuplexStream,
+  TDuplexStreamStatus
 };
 
 export {
-  transformGuard
+  duplexGuard
 };

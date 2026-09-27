@@ -76,20 +76,26 @@ type TSinkStreamWriteTransactionStatus = {
 //  - a transaction MUST end as committed or discarded and MUST NOT be pending in a final status (finished, failed, destroyed)
 //  - a transaction MUST NOT be discarded unless the stream is failed or destroyed
 
-type TSinkStreamWriteTransaction = {
+type TSinkStreamWriteTransaction<X extends TSinkStreamWriteTransactionStatus = TSinkStreamWriteTransactionStatus> = {
   // MUST yield the same result until either:
   //  - a method of the stream that created this transaction is called
   //  - that stream changes it by itself (e.g. an own update() method or an IO callback)
   // i.e. if you repeatedly call status() and nothing else, the result MUST NOT change
   // the returned object MUST NOT be modified afterwards, it MAY be a new object on every call
-  status: () => TSinkStreamWriteTransactionStatus;
+  status: () => X;
 };
 
 // S are the statuses the stream may yield, an implementation MAY declare a subset of them
 // and MAY add own properties to them besides type (e.g. { type: "open", remainingChunks: 3 }):
 //  - own properties MUST be plain data, as statuses are compared by value and are immutable
 //  - own properties are part of the status, so the rules for status() and poll() apply to them as well
-type TSinkStream<T extends TStreamChunk, S extends TSinkStreamStatus = TSinkStreamStatus> = {
+// X are the statuses the transactions of the stream may yield, like with S, an implementation MAY declare a subset
+// of them and MAY add own properties to them besides type (e.g. { type: "committed", offset: 1024 })
+type TSinkStream<
+  T extends TStreamChunk,
+  S extends TSinkStreamStatus = TSinkStreamStatus,
+  X extends TSinkStreamWriteTransactionStatus = TSinkStreamWriteTransactionStatus
+> = {
   // MUST yield the same result until either:
   //  - a method of this interface is called
   //  - the implementation changes it by itself (e.g. an own update() method or an IO callback)
@@ -106,7 +112,7 @@ type TSinkStream<T extends TStreamChunk, S extends TSinkStreamStatus = TSinkStre
   //  - status destroying
   //  - status destroyed
   // chunks MUST NOT be empty
-  write: (args: { chunks: readonly T[] }) => TSinkStreamWriteTransaction;
+  write: (args: { chunks: readonly T[] }) => TSinkStreamWriteTransaction<X>;
 
   // MUST NOT be called in:
   //  - status opening
@@ -158,8 +164,12 @@ const SINK_TRANSITIONS: readonly TTransition[] = [
 const SINK_INACTIVE = ["opening", "finishing", "finished", "failing", "failed", "destroying", "destroyed"];
 
 // enforces the contract of the sink stream, a violation throws and is meant to crash the process
-const sinkGuard = <T extends TStreamChunk, S extends TSinkStreamStatus>({ sink }: { sink: TSinkStream<T, S> }): TSinkStream<T, S> => {
-  const transactions = createTransactionTracker({
+const sinkGuard = <T extends TStreamChunk, S extends TSinkStreamStatus, X extends TSinkStreamWriteTransactionStatus>({
+  sink
+}: {
+  sink: TSinkStream<T, S, X>
+}): TSinkStream<T, S, X> => {
+  const transactions = createTransactionTracker<X>({
     name: "sink",
     completeStatus: "finished",
     finalStatuses: ["finished", "failed", "destroyed"],

@@ -14,7 +14,7 @@ describe("nullSink", () => {
     sink.end();
 
     assert.deepEqual(transaction.status(), { type: "committed" });
-    assert.deepEqual(sink.status(), { type: "finished" });
+    assert.deepEqual(sink.status(), { type: "finished", chunksWritten: 1 });
   });
 
   it("should be destroyable", () => {
@@ -22,6 +22,6 @@ describe("nullSink", () => {
 
     sink.destroy();
 
-    assert.deepEqual(sink.status(), { type: "destroyed" });
+    assert.deepEqual(sink.status(), { type: "destroyed", chunksWritten: 0 });
   });
 });

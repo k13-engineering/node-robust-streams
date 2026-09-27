@@ -1,16 +1,16 @@
 import assert from "node:assert/strict";
 import { describe, it } from "mocha";
-import { syncTransform } from "./sync-transform.ts";
-import { transformGuard } from "./transform-stream.ts";
-import type { TTransformStream, TTransformStreamStatus } from "./transform-stream.ts";
+import { syncDuplex } from "./sync-duplex.ts";
+import { duplexGuard } from "./duplex-stream.ts";
+import type { TDuplexStream, TDuplexStreamStatus } from "./duplex-stream.ts";
 import { pollHandle, textChunks } from "./test-helpers.spec.ts";
 import type { TTextChunk } from "./test-helpers.spec.ts";
 
-// a transform whose status is set by the test, its transactions stay pending
-const createScriptedTransform = ({ initial }: { initial: TTransformStreamStatus["type"] }) => {
-  let status: TTransformStreamStatus = { type: initial };
+// a duplex whose status is set by the test, its transactions stay pending
+const createScriptedDuplex = ({ initial }: { initial: TDuplexStreamStatus["type"] }) => {
+  let status: TDuplexStreamStatus = { type: initial };
 
-  const transform: TTransformStream<TTextChunk, TTextChunk> = {
+  const duplex: TDuplexStream<TTextChunk, TTextChunk> = {
     status: () => {
       return status;
     },
@@ -36,20 +36,20 @@ const createScriptedTransform = ({ initial }: { initial: TTransformStreamStatus[
   };
 
   return {
-    transform,
-    setStatus: ({ type }: { type: TTransformStreamStatus["type"] }) => {
+    duplex,
+    setStatus: ({ type }: { type: TDuplexStreamStatus["type"] }) => {
       status = { type };
     }
   };
 };
 
-const guardedIn = ({ type }: { type: TTransformStreamStatus["type"] }) => {
-  return transformGuard({ transform: createScriptedTransform({ initial: type }).transform });
+const guardedIn = ({ type }: { type: TDuplexStreamStatus["type"] }) => {
+  return duplexGuard({ duplex: createScriptedDuplex({ initial: type }).duplex });
 };
 
 const WRITE_INACTIVE = ["opening", "flushing", "done", "failing", "failed", "destroying", "destroyed"] as const;
 
-describe("transformGuard", () => {
+describe("duplexGuard", () => {
 
   describe("calls in forbidden statuses", () => {
     it("should throw when read() is called in a forbidden status", () => {
@@ -58,7 +58,7 @@ describe("transformGuard", () => {
       forbidden.forEach((type) => {
         assert.throws(() => {
           guardedIn({ type }).read();
-        }, new RegExp(`contract violation: transform\\.read\\(\\) MUST NOT be called in status ${type}`));
+        }, new RegExp(`contract violation: duplex\\.read\\(\\) MUST NOT be called in status ${type}`));
       });
     });
 
@@ -70,7 +70,7 @@ describe("transformGuard", () => {
       WRITE_INACTIVE.forEach((type) => {
         assert.throws(() => {
           guardedIn({ type }).write({ chunks: textChunks({ texts: ["a"] }) });
-        }, new RegExp(`contract violation: transform\\.write\\(\\) MUST NOT be called in status ${type}`));
+        }, new RegExp(`contract violation: duplex\\.write\\(\\) MUST NOT be called in status ${type}`));
       });
     });
 
@@ -78,7 +78,7 @@ describe("transformGuard", () => {
       WRITE_INACTIVE.forEach((type) => {
         assert.throws(() => {
           guardedIn({ type }).end();
-        }, new RegExp(`contract violation: transform\\.end\\(\\) MUST NOT be called in status ${type}`));
+        }, new RegExp(`contract violation: duplex\\.end\\(\\) MUST NOT be called in status ${type}`));
       });
     });
 
@@ -88,7 +88,7 @@ describe("transformGuard", () => {
       forbidden.forEach((type) => {
         assert.throws(() => {
           guardedIn({ type }).poll({ onUpdate: () => {} });
-        }, new RegExp(`contract violation: transform\\.poll\\(\\) MUST NOT be called in status ${type}`));
+        }, new RegExp(`contract violation: duplex\\.poll\\(\\) MUST NOT be called in status ${type}`));
       });
     });
 
@@ -98,7 +98,7 @@ describe("transformGuard", () => {
       forbidden.forEach((type) => {
         assert.throws(() => {
           guardedIn({ type }).destroy();
-        }, new RegExp(`contract violation: transform\\.destroy\\(\\) MUST NOT be called in status ${type}`));
+        }, new RegExp(`contract violation: duplex\\.destroy\\(\\) MUST NOT be called in status ${type}`));
       });
     });
   });
@@ -107,24 +107,24 @@ describe("transformGuard", () => {
     it("should throw when write() is called with an empty chunks array", () => {
       assert.throws(() => {
         guardedIn({ type: "open" }).write({ chunks: [] });
-      }, /contract violation: transform\.write\(\) MUST NOT be called with an empty chunks array/);
+      }, /contract violation: duplex\.write\(\) MUST NOT be called with an empty chunks array/);
     });
 
     it("should throw if a transaction is still pending once done", () => {
-      const { transform, setStatus } = createScriptedTransform({ initial: "open" });
-      const guarded = transformGuard({ transform });
+      const { duplex, setStatus } = createScriptedDuplex({ initial: "open" });
+      const guarded = duplexGuard({ duplex });
 
       guarded.write({ chunks: textChunks({ texts: ["a"] }) });
       setStatus({ type: "done" });
 
       assert.throws(() => {
         guarded.status();
-      }, /contract violation: transform: transactions MUST NOT be pending in status done/);
+      }, /contract violation: duplex: transactions MUST NOT be pending in status done/);
     });
 
     it("should pass a valid lifecycle through", () => {
-      const guarded = transformGuard({
-        transform: syncTransform<TTextChunk, TTextChunk>({
+      const guarded = duplexGuard({
+        duplex: syncDuplex<TTextChunk, TTextChunk>({
           transform: ({ chunks }) => {
             return { chunks };
           }

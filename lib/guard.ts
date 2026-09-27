@@ -262,12 +262,12 @@ const guardPoll = <S extends TStatus>({
   };
 };
 
-type TTransactionTracker = {
-  track: (args: { transaction: TSinkStreamWriteTransaction }) => TSinkStreamWriteTransaction;
+type TTransactionTracker<X extends TSinkStreamWriteTransactionStatus> = {
+  track: (args: { transaction: TSinkStreamWriteTransaction<X> }) => TSinkStreamWriteTransaction<X>;
   checkStream: (args: { status: TStatus }) => void;
 };
 
-const createTransactionTracker = ({
+const createTransactionTracker = <X extends TSinkStreamWriteTransactionStatus>({
   name,
   completeStatus,
   finalStatuses,
@@ -277,12 +277,12 @@ const createTransactionTracker = ({
   completeStatus: string;
   finalStatuses: readonly string[];
   streamStatus: () => TStatus;
-}): TTransactionTracker => {
+}): TTransactionTracker<X> => {
   const discardStatuses = ["failed", "destroyed"];
-  let transactions: readonly TSinkStreamWriteTransaction[] = [];
+  let transactions: readonly TSinkStreamWriteTransaction<X>[] = [];
 
   const hasStatus = ({ type }: { type: string }) => {
-    return (transaction: TSinkStreamWriteTransaction) => {
+    return (transaction: TSinkStreamWriteTransaction<X>) => {
       return transaction.status().type === type;
     };
   };
@@ -301,7 +301,7 @@ const createTransactionTracker = ({
     }
   };
 
-  const onTransactionObserved = ({ index, status }: { index: number; status: TSinkStreamWriteTransactionStatus }) => {
+  const onTransactionObserved = ({ index, status }: { index: number; status: X }) => {
     if (status.type === "committed") {
       checkOrder({ index });
     }
@@ -311,11 +311,11 @@ const createTransactionTracker = ({
     }
   };
 
-  const track: TTransactionTracker["track"] = ({ transaction }) => {
+  const track: TTransactionTracker<X>["track"] = ({ transaction }) => {
     const index = transactions.length;
     transactions = [...transactions, transaction];
 
-    const ctx = createGuardContext<TSinkStreamWriteTransactionStatus>({
+    const ctx = createGuardContext<X>({
       spec: { name: `${name} transaction`, transitions: TRANSACTION_TRANSITIONS },
       status: transaction.status,
       onObserve: ({ status }) => {
@@ -325,7 +325,9 @@ const createTransactionTracker = ({
 
     ctx.observe();
 
+    // own properties of the transaction object are kept, only status() is guarded
     return {
+      ...transaction,
       status: ctx.observe
     };
   };
@@ -359,7 +361,7 @@ const createTransactionTracker = ({
   };
 };
 
-const guardWrite = <S extends TStatus, T>({
+const guardWrite = <S extends TStatus, T, X extends TSinkStreamWriteTransactionStatus>({
   name,
   ctx,
   forbidden,
@@ -369,10 +371,10 @@ const guardWrite = <S extends TStatus, T>({
   name: string;
   ctx: TGuardContext<S>;
   forbidden: readonly string[];
-  write: (args: { chunks: readonly T[] }) => TSinkStreamWriteTransaction;
-  transactions: TTransactionTracker;
+  write: (args: { chunks: readonly T[] }) => TSinkStreamWriteTransaction<X>;
+  transactions: TTransactionTracker<X>;
 }) => {
-  return ({ chunks }: { chunks: readonly T[] }): TSinkStreamWriteTransaction => {
+  return ({ chunks }: { chunks: readonly T[] }): TSinkStreamWriteTransaction<X> => {
     if (chunks.length === 0) {
       throw violation({ message: `${name}.write() MUST NOT be called with an empty chunks array` });
     }

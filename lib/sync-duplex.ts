@@ -5,21 +5,21 @@ import type {
 } from "./sink-stream.ts";
 import type { TSourceStreamReadResult } from "./source-stream.ts";
 import type { TStreamChunk } from "./stream-chunk.ts";
-import type { TTransformStream, TTransformStreamStatus } from "./transform-stream.ts";
+import type { TDuplexStream, TDuplexStreamStatus } from "./duplex-stream.ts";
 
-type TSyncTransformResult<U extends TStreamChunk> = {
+type TSyncDuplexResult<U extends TStreamChunk> = {
   error?: Error;
   chunks?: readonly U[];
 };
 
-// the statuses a sync transform may yield
-type TSyncTransformStatus = Extract<TTransformStreamStatus, { type: "open" | "flushing" | "done" | "failed" | "destroyed" }>;
+// the statuses a sync duplex may yield
+type TSyncDuplexStatus = Extract<TDuplexStreamStatus, { type: "open" | "flushing" | "done" | "failed" | "destroyed" }>;
 
-const OPEN: TSyncTransformStatus = Object.freeze({ type: "open" });
-const FLUSHING: TSyncTransformStatus = Object.freeze({ type: "flushing" });
-const DONE: TSyncTransformStatus = Object.freeze({ type: "done" });
-const FAILED: TSyncTransformStatus = Object.freeze({ type: "failed" });
-const DESTROYED: TSyncTransformStatus = Object.freeze({ type: "destroyed" });
+const OPEN: TSyncDuplexStatus = Object.freeze({ type: "open" });
+const FLUSHING: TSyncDuplexStatus = Object.freeze({ type: "flushing" });
+const DONE: TSyncDuplexStatus = Object.freeze({ type: "done" });
+const FAILED: TSyncDuplexStatus = Object.freeze({ type: "failed" });
+const DESTROYED: TSyncDuplexStatus = Object.freeze({ type: "destroyed" });
 
 const PENDING: TSinkStreamWriteTransactionStatus = Object.freeze({ type: "pending" });
 const COMMITTED: TSinkStreamWriteTransactionStatus = Object.freeze({ type: "committed" });
@@ -28,27 +28,27 @@ const DISCARDED: TSinkStreamWriteTransactionStatus = Object.freeze({ type: "disc
 const ACTIVE = ["open", "flushing"];
 const DISCARDING = ["failed", "destroyed"];
 
-const noChunks = <U extends TStreamChunk>(): TSyncTransformResult<U> => {
+const noChunks = <U extends TStreamChunk>(): TSyncDuplexResult<U> => {
   return { chunks: [] };
 };
 
-// transform processing chunks synchronously within write()
+// duplex processing chunks synchronously within write()
 //  - start is called before the first chunks are transformed, finish is called by end(), both may produce chunks
 //  - a transaction is committed once all data resulting from its chunks has been read
-//  - start, transform and finish MUST return error or chunks, an error fails the transform, as statuses
+//  - start, transform and finish MUST return error or chunks, an error fails the duplex, as statuses
 //    do not carry error information yet, the error itself is not reported
 //  - an exception thrown by start, transform or finish is a bug and is not caught
-const syncTransform = <T extends TStreamChunk, U extends TStreamChunk>({
+const syncDuplex = <T extends TStreamChunk, U extends TStreamChunk>({
   start = noChunks,
   transform,
   finish = noChunks
 }: {
-  start?: () => TSyncTransformResult<U>;
-  transform: (args: { chunks: readonly T[] }) => TSyncTransformResult<U>;
-  finish?: () => TSyncTransformResult<U>;
-}): TTransformStream<T, U, TSyncTransformStatus> => {
+  start?: () => TSyncDuplexResult<U>;
+  transform: (args: { chunks: readonly T[] }) => TSyncDuplexResult<U>;
+  finish?: () => TSyncDuplexResult<U>;
+}): TDuplexStream<T, U, TSyncDuplexStatus> => {
   const polls = createPollRegistry();
-  let status: TSyncTransformStatus = OPEN;
+  let status: TSyncDuplexStatus = OPEN;
   let started = false;
   let buffered: readonly U[] = [];
   let written = 0;
@@ -62,9 +62,9 @@ const syncTransform = <T extends TStreamChunk, U extends TStreamChunk>({
     return DISCARDING.includes(status.type) ? DISCARDED : PENDING;
   };
 
-  const process = ({ result }: { result: TSyncTransformResult<U> }) => {
+  const process = ({ result }: { result: TSyncDuplexResult<U> }) => {
     if (result.error === undefined && result.chunks === undefined) {
-      throw Error("sync transform: start, transform and finish MUST return error or chunks");
+      throw Error("sync duplex: start, transform and finish MUST return error or chunks");
     }
 
     if (result.error !== undefined) {
@@ -163,10 +163,10 @@ const syncTransform = <T extends TStreamChunk, U extends TStreamChunk>({
 };
 
 export type {
-  TSyncTransformResult,
-  TSyncTransformStatus
+  TSyncDuplexResult,
+  TSyncDuplexStatus
 };
 
 export {
-  syncTransform
+  syncDuplex
 };

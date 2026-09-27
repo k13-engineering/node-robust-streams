@@ -5,18 +5,26 @@ import * as robustStreams from "./index.ts";
 describe("index", () => {
   it("should export the public api", () => {
     assert.deepEqual(Object.keys(robustStreams).toSorted(), [
+      "assertPumpable",
+      "assertSinkStatusNotDestroyed",
+      "assertSinkStatusNotInProgress",
+      "assertSourceStatusNotDestroyed",
+      "assertSourceStatusNotInProgress",
+      "createBinaryStreamPressureGauge",
+      "createBinaryStreamPressureGaugePump",
       "createPollRegistry",
-      "createPump",
+      "createStreamPressureGauge",
+      "duplexGuard",
       "errorSource",
       "fixedChunksSource",
       "nullSink",
+      "pump",
       "runPump",
       "sinkGuard",
       "sourceGuard",
+      "syncDuplex",
       "syncSink",
-      "syncSource",
-      "syncTransform",
-      "transformGuard"
+      "syncSource"
     ]);
   });
 
